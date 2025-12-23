@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Fresh Veggies Backend
 
 Backend API for Fresh Veggies e-commerce platform built with Node.js, Express, and MongoDB.
@@ -160,3 +161,7 @@ For production deployment:
 3. Set up MongoDB Atlas for database
 4. Configure environment variables
 5. Enable CORS for your frontend domain
+=======
+# fresh-veggies-seeds-backend
+Full-stack e-commerce platform for selling organic seeds, fertilizers, gardening kits, and combo packs with admin product management.
+>>>>>>> 622f6be56923ea5b50cb926792a9a7fa71be1ed6
