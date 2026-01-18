@@ -6,9 +6,15 @@ const {
   getOrder,
   getAllOrders,
   updateOrderStatus,
-  cancelOrder
+  cancelOrder,
+  createShipment,
+  trackOrder,
+  checkPincodeServiceability
 } = require('../controllers/orderController');
 const { protect, admin } = require('../middleware/auth');
+
+// Public routes
+router.get('/check-pincode/:pincode', checkPincodeServiceability);
 
 router.route('/')
   .post(protect, createOrder)
@@ -21,5 +27,9 @@ router.route('/:id')
 
 router.put('/:id/status', protect, admin, updateOrderStatus);
 router.put('/:id/cancel', protect, cancelOrder);
+
+// Shipping routes
+router.post('/:id/ship', protect, admin, createShipment);
+router.get('/:id/track', protect, trackOrder);
 
 module.exports = router;

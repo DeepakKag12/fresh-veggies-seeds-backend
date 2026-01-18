@@ -84,6 +84,23 @@ const orderSchema = new mongoose.Schema({
     enum: ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Delivered', 'Cancelled'],
     default: 'Pending'
   },
+  // Shipping & Tracking Details
+  shipping: {
+    courierName: {
+      type: String,
+      default: 'DTDC'
+    },
+    awbNumber: String, // Air Waybill Number (Tracking Number)
+    trackingUrl: String,
+    shippedAt: Date,
+    estimatedDelivery: Date,
+    trackingHistory: [{
+      status: String,
+      location: String,
+      timestamp: Date,
+      remarks: String
+    }]
+  },
   deliveredAt: Date,
   cancelledAt: Date,
   notes: String

@@ -1,6 +1,7 @@
 const Order = require('../models/Order');
 const Product = require('../models/Product');
 const Combo = require('../models/Combo');
+const dtdcService = require('../services/dtdcService');
 
 // @desc    Create new order
 // @route   POST /api/orders
@@ -194,6 +195,11 @@ exports.cancelOrder = async (req, res) => {
       });
     }
 
+    // Cancel DTDC shipment if it exists
+    if (order.shipping && order.shipping.awbNumber) {
+      await dtdcService.cancelShipment(order.shipping.awbNumber);
+    }
+
     order.orderStatus = 'Cancelled';
     order.cancelledAt = Date.now();
     await order.save();
@@ -201,6 +207,136 @@ exports.cancelOrder = async (req, res) => {
     res.status(200).json({
       success: true,
       data: order
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// @desc    Create DTDC shipment for order (Admin)
+// @route   POST /api/orders/:id/ship
+// @access  Private/Admin
+exports.createShipment = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    // Check if already shipped
+    if (order.shipping && order.shipping.awbNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order already has a shipment'
+      });
+    }
+
+    // Create DTDC shipment
+    const shipmentResult = await dtdcService.createShipment(order);
+
+    if (!shipmentResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to create shipment',
+        error: shipmentResult.error
+      });
+    }
+
+    // Update order with shipping details
+    order.shipping = {
+      courierName: shipmentResult.courierName,
+      awbNumber: shipmentResult.awbNumber,
+      trackingUrl: shipmentResult.trackingUrl,
+      shippedAt: new Date(),
+      estimatedDelivery: shipmentResult.estimatedDelivery
+    };
+    order.orderStatus = 'Shipped';
+
+    await order.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Shipment created successfully',
+      data: order
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// @desc    Track order shipment
+// @route   GET /api/orders/:id/track
+// @access  Private
+exports.trackOrder = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    // Check if order belongs to user or user is admin
+    if (order.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to track this order'
+      });
+    }
+
+    if (!order.shipping || !order.shipping.awbNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order not yet shipped'
+      });
+    }
+
+    // Get tracking info from DTDC
+    const trackingResult = await dtdcService.trackShipment(order.shipping.awbNumber);
+
+    if (trackingResult.success) {
+      // Update order tracking history
+      order.shipping.trackingHistory = trackingResult.statusHistory;
+      await order.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      tracking: trackingResult,
+      order: order
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// @desc    Check pincode serviceability
+// @route   GET /api/orders/check-pincode/:pincode
+// @access  Public
+exports.checkPincodeServiceability = async (req, res) => {
+  try {
+    const { pincode } = req.params;
+
+    const result = await dtdcService.checkPincodeServiceability(pincode);
+
+    res.status(200).json({
+      success: true,
+      data: result
     });
   } catch (error) {
     res.status(500).json({
