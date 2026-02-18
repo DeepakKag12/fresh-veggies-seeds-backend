@@ -66,9 +66,11 @@ exports.getProducts = async (req, res) => {
       data: products
     });
   } catch (error) {
+    console.error('❌ getProducts error:', error.message, error.stack);
     res.status(500).json({
       success: false,
-      message: error.message
+      message: error.message,
+      detail: error.stack
     });
   }
 };
