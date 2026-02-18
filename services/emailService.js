@@ -6,11 +6,14 @@ const nodemailer = require('nodemailer');
 // Create transporter for Brevo SMTP
 let transporter = nodemailer.createTransport({
   host: process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com',
-  port: process.env.BREVO_SMTP_PORT || 587,
+  port: parseInt(process.env.BREVO_SMTP_PORT) || 587,
   secure: false,
   auth: {
     user: process.env.BREVO_SMTP_USER,
     pass: process.env.BREVO_SMTP_PASS
+  },
+  tls: {
+    rejectUnauthorized: false
   }
 });
 
@@ -68,7 +71,8 @@ exports.sendForgotPasswordEmail = async (user, resetToken, resetUrl) => {
     console.error('❌ Error sending email:', error.message);
     return {
       success: false,
-      message: 'Failed to send reset email'
+      message: 'Failed to send reset email',
+      error: error.message
     };
   }
 };
@@ -128,7 +132,8 @@ exports.sendOTPEmail = async (user, otp) => {
     console.error('❌ Error sending OTP email:', error.message);
     return {
       success: false,
-      message: 'Failed to send OTP'
+      message: 'Failed to send OTP',
+      error: error.message
     };
   }
 };
@@ -156,7 +161,7 @@ exports.sendPasswordResetConfirmation = async (user) => {
           <p style="color: #374151;">✅ Your password has been successfully reset.</p>
           <p style="color: #374151;">You can now login with your new password.</p>
           <div style="text-align: center; margin: 30px 0;">
-            <a href="${process.env.FRONTEND_URL}/login" style="background-color: #16a34a; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">Go to Login</a>
+            <a href="https://fresh-veggies-seeds-frontend.vercel.app/login" style="background-color: #16a34a; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">Go to Login</a>
           </div>
           <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
           <p style="color: #dc2626; font-size: 12px;">🔒 If you didn't make this change, please contact our support team immediately.</p>

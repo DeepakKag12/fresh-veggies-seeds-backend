@@ -72,7 +72,16 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     message: 'Server is running',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    env: {
+      NODE_ENV: process.env.NODE_ENV,
+      JWT_SECRET: !!process.env.JWT_SECRET,
+      MONGODB_URI: !!process.env.MONGODB_URI,
+      BREVO_SMTP_USER: !!process.env.BREVO_SMTP_USER,
+      BREVO_SMTP_PASS: !!process.env.BREVO_SMTP_PASS,
+      FRONTEND_URL: process.env.FRONTEND_URL,
+      RAZORPAY_KEY_ID: !!process.env.RAZORPAY_KEY_ID
+    }
   });
 });
 

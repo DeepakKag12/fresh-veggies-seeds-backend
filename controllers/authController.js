@@ -124,6 +124,8 @@ exports.login = async (req, res) => {
     // Reset login attempts on successful login
     await user.resetLoginAttempts();
 
+    const token = generateToken(user._id);
+
     res.status(200).json({
       success: true,
       data: {
@@ -133,13 +135,14 @@ exports.login = async (req, res) => {
         phone: user.phone,
         role: user.role,
         address: user.address,
-        token: generateToken(user._id)
+        token
       }
     });
   } catch (error) {
+    console.error('❌ LOGIN ERROR:', error.message, '| JWT_SECRET set:', !!process.env.JWT_SECRET);
     res.status(500).json({
       success: false,
-      message: error.message
+      message: !process.env.JWT_SECRET ? 'JWT_SECRET environment variable not configured' : error.message
     });
   }
 };
@@ -324,8 +327,11 @@ exports.forgotPassword = async (req, res) => {
     const resetToken = user.generatePasswordResetToken();
     await user.save({ validateBeforeSave: false });
 
-    // Create reset URL
-    const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+    // Create reset URL - use production URL, not localhost
+    const frontendUrl = (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes('localhost'))
+      ? process.env.FRONTEND_URL
+      : 'https://fresh-veggies-seeds-frontend.vercel.app';
+    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
 
     // Send email
     const emailResult = await emailService.sendForgotPasswordEmail(user, resetToken, resetUrl);
@@ -467,7 +473,7 @@ exports.sendOTP = async (req, res) => {
       
       return res.status(500).json({
         success: false,
-        message: 'Failed to send OTP. Please try again.'
+        message: `Failed to send OTP: ${emailResult.error || emailResult.message || 'Email service error'}`
       });
     }
 
@@ -477,6 +483,7 @@ exports.sendOTP = async (req, res) => {
       userId: user._id
     });
   } catch (error) {
+    console.error('❌ SEND-OTP ERROR:', error.message);
     res.status(500).json({
       success: false,
       message: error.message
