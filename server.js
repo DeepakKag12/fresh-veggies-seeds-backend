@@ -1,12 +1,13 @@
 const express = require('express');
+const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const dotenv = require('dotenv');
+const helmet = require('helmet');
 
-// Load environment variables
+// Load environment variables FIRST before anything else
 dotenv.config();
 
-// Initialize express app
+// Initialize Express app
 const app = express();
 
 // CORS Configuration
@@ -24,6 +25,7 @@ const corsOptions = {
 };
 
 // Middleware
+app.use(helmet());
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -39,6 +41,7 @@ app.use('/api/categories', require('./routes/categoryRoutes'));
 app.use('/api/products', require('./routes/productRoutes'));
 app.use('/api/combos', require('./routes/comboRoutes'));
 app.use('/api/orders', require('./routes/orderRoutes'));
+app.use('/api/payments', require('./routes/paymentRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
 app.use('/api/upload', require('./routes/uploadRoutes'));
 app.use('/api/coupons', require('./routes/couponRoutes'));
