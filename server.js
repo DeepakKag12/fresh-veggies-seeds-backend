@@ -11,14 +11,27 @@ dotenv.config();
 const app = express();
 
 // CORS Configuration
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://fresh-veggies-seeds-frontend.vercel.app',
+  'https://fresh-veggies-seeds-frontend-git-main-deepak-kags-projects.vercel.app',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? [
-        'https://fresh-veggies-seeds-frontend.vercel.app',
-        'https://fresh-veggies-seeds-frontend-git-main-deepak-kags-projects.vercel.app',
-        process.env.FRONTEND_URL
-      ].filter(Boolean)
-    : ['http://localhost:3000', 'http://localhost:3001'],
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    // Allow any vercel.app preview/deployment URL for this project
+    if (
+      allowedOrigins.includes(origin) ||
+      /^https:\/\/fresh-veggies-seeds.*\.vercel\.app$/.test(origin)
+    ) {
+      return callback(null, true);
+    }
+    callback(new Error('Not allowed by CORS: ' + origin));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
