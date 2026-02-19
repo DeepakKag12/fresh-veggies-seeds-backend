@@ -49,7 +49,7 @@ const orderSchema = new mongoose.Schema({
   },
   paymentStatus: {
     type: String,
-    enum: ['Pending', 'Paid', 'Failed'],
+    enum: ['Pending', 'Paid', 'Failed', 'Refunded'],
     default: 'Pending'
   },
   paymentDetails: {
@@ -84,7 +84,7 @@ const orderSchema = new mongoose.Schema({
   },
   orderStatus: {
     type: String,
-    enum: ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Delivered', 'Cancelled'],
+    enum: ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Delivered', 'Cancelled', 'CancellationRequested'],
     default: 'Pending'
   },
   // Shipping & Tracking Details
@@ -106,6 +106,23 @@ const orderSchema = new mongoose.Schema({
   },
   deliveredAt: Date,
   cancelledAt: Date,
+  cancellationRequest: {
+    reason: String,
+    requestedAt: Date,
+    previousStatus: String,
+    rejectedAt: Date,
+    rejectionReason: String
+  },
+  refund: {
+    refundId: String,
+    refundAmount: Number,
+    refundStatus: {
+      type: String,
+      enum: ['Pending', 'Processed', 'Failed']
+    },
+    refundedAt: Date,
+    reason: String
+  },
   notes: String
 }, {
   timestamps: true

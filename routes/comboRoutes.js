@@ -8,14 +8,15 @@ const {
   deleteCombo
 } = require('../controllers/comboController');
 const { protect, admin } = require('../middleware/auth');
+const validateObjectId = require('../middleware/validateObjectId');
 
 router.route('/')
   .get(getCombos)
   .post(protect, admin, createCombo);
 
 router.route('/:id')
-  .get(getCombo)
-  .put(protect, admin, updateCombo)
-  .delete(protect, admin, deleteCombo);
+  .get(validateObjectId, getCombo)
+  .put(protect, admin, validateObjectId, updateCombo)
+  .delete(protect, admin, validateObjectId, deleteCombo);
 
 module.exports = router;

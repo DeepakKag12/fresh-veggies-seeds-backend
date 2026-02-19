@@ -88,7 +88,7 @@ exports.createReview = async (req, res) => {
       const order = await Order.findOne({
         _id: orderId,
         userId,
-        'orderItems.productId': productId,
+        'orderItems.product': productId,
         orderStatus: 'Delivered'
       });
       isVerifiedPurchase = !!order;

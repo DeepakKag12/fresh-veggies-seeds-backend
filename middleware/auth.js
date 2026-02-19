@@ -6,34 +6,36 @@ exports.protect = async (req, res, next) => {
   try {
     let token;
 
-    // Check for token in headers
     if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
       token = req.headers.authorization.split(' ')[1];
     }
 
     if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: 'Not authorized to access this route'
-      });
+      return res.status(401).json({ success: false, message: 'Not authorized — no token provided' });
     }
 
+    let decoded;
     try {
-      // Verify token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decoded.id);
-      next();
-    } catch (error) {
-      return res.status(401).json({
-        success: false,
-        message: 'Not authorized, token failed'
-      });
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (err) {
+      const msg = err.name === 'TokenExpiredError'
+        ? 'Session expired — please login again'
+        : 'Invalid token — please login again';
+      return res.status(401).json({ success: false, message: msg });
     }
+
+    const user = await User.findById(decoded.id).select('-password');
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'User no longer exists' });
+    }
+    if (!user.isActive) {
+      return res.status(403).json({ success: false, message: 'Account has been deactivated. Contact support.' });
+    }
+
+    req.user = user;
+    next();
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Server error in authentication'
-    });
+    res.status(500).json({ success: false, message: 'Server error in authentication' });
   }
 };
 
@@ -42,9 +44,6 @@ exports.admin = (req, res, next) => {
   if (req.user && req.user.role === 'admin') {
     next();
   } else {
-    res.status(403).json({
-      success: false,
-      message: 'Access denied. Admin only.'
-    });
+    res.status(403).json({ success: false, message: 'Access denied. Admin only.' });
   }
 };

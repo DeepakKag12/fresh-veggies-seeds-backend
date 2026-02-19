@@ -7,11 +7,14 @@ const {
   getAllOrders,
   updateOrderStatus,
   cancelOrder,
+  approveCancellation,
+  rejectCancellation,
   createShipment,
   trackOrder,
   checkPincodeServiceability
 } = require('../controllers/orderController');
 const { protect, admin } = require('../middleware/auth');
+const validateObjectId = require('../middleware/validateObjectId');
 
 // Public routes
 router.get('/check-pincode/:pincode', checkPincodeServiceability);
@@ -22,14 +25,19 @@ router.route('/')
 
 router.get('/myorders', protect, getMyOrders);
 
+// All /:id routes share ObjectId validation
 router.route('/:id')
-  .get(protect, getOrder);
+  .get(protect, validateObjectId, getOrder);
 
-router.put('/:id/status', protect, admin, updateOrderStatus);
-router.put('/:id/cancel', protect, cancelOrder);
+router.put('/:id/status', protect, admin, validateObjectId, updateOrderStatus);
+
+// Cancellation flow
+router.put('/:id/cancel',          protect,        validateObjectId, cancelOrder);          // user
+router.put('/:id/approve-cancel',  protect, admin, validateObjectId, approveCancellation);  // admin: approve + refund
+router.put('/:id/reject-cancel',   protect, admin, validateObjectId, rejectCancellation);   // admin: reject
 
 // Shipping routes
-router.post('/:id/ship', protect, admin, createShipment);
-router.get('/:id/track', protect, trackOrder);
+router.post('/:id/ship',  protect, admin, validateObjectId, createShipment);
+router.get('/:id/track',  protect,        validateObjectId, trackOrder);
 
 module.exports = router;

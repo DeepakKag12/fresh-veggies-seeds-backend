@@ -20,7 +20,12 @@ exports.getDashboardStats = async (req, res) => {
     const totalRevenue = revenueData.length > 0 ? revenueData[0].total : 0;
 
     const pendingOrders = await Order.countDocuments({ orderStatus: 'Pending' });
+    const confirmedOrders = await Order.countDocuments({ orderStatus: 'Confirmed' });
+    const shippedOrders = await Order.countDocuments({ orderStatus: 'Shipped' });
     const deliveredOrders = await Order.countDocuments({ orderStatus: 'Delivered' });
+    const cancelledOrders = await Order.countDocuments({ orderStatus: 'Cancelled' });
+    const cancellationRequests = await Order.countDocuments({ orderStatus: 'CancellationRequested' });
+    const failedPayments = await Order.countDocuments({ paymentStatus: 'Failed' });
     const lowStockProducts = await Product.countDocuments({ stock: { $lt: 10 } });
     const pendingReviews = await Review.countDocuments({ isApproved: false });
 
@@ -41,7 +46,12 @@ exports.getDashboardStats = async (req, res) => {
         totalProducts,
         totalRevenue,
         pendingOrders,
+        confirmedOrders,
+        shippedOrders,
         deliveredOrders,
+        cancelledOrders,
+        cancellationRequests,
+        failedPayments,
         lowStockProducts,
         pendingReviews,
         todayOrders,
@@ -82,6 +92,10 @@ exports.getAllUsers = async (req, res) => {
 exports.updateUserRole = async (req, res) => {
   try {
     const { role } = req.body;
+
+    if (!['admin', 'customer'].includes(role)) {
+      return res.status(400).json({ success: false, message: 'Invalid role. Must be admin or customer.' });
+    }
 
     const user = await User.findByIdAndUpdate(
       req.params.id,
@@ -179,7 +193,7 @@ exports.getSalesAnalytics = async (req, res) => {
       { $unwind: '$orderItems' },
       {
         $group: {
-          _id: '$orderItems.productId',
+          _id: '$orderItems.product',
           quantity: { $sum: '$orderItems.quantity' },
           revenue: { $sum: { $multiply: ['$orderItems.price', '$orderItems.quantity'] } }
         }
@@ -209,7 +223,7 @@ exports.getSalesAnalytics = async (req, res) => {
       {
         $lookup: {
           from: 'products',
-          localField: 'orderItems.productId',
+          localField: 'orderItems.product',
           foreignField: '_id',
           as: 'product'
         }

@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 // Load environment variables FIRST before anything else
 dotenv.config();
@@ -10,7 +11,7 @@ dotenv.config();
 // Initialize Express app
 const app = express();
 
-// CORS Configuration
+// ─── CORS Configuration ───────────────────────────────────────────────────────
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
@@ -21,9 +22,7 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, Postman)
     if (!origin) return callback(null, true);
-    // Allow any vercel.app preview/deployment URL for this project
     if (
       allowedOrigins.includes(origin) ||
       /^https:\/\/fresh-veggies-seeds.*\.vercel\.app$/.test(origin)
@@ -37,89 +36,131 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
-// Middleware
+// ─── Security middleware ──────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors(corsOptions));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Database connection
+// ─── Webhook route must receive RAW body (before express.json) ───────────────
+app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
+
+// ─── JSON body parser (all other routes) ─────────────────────────────────────
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+// ─── Rate Limiters ────────────────────────────────────────────────────────────
+
+// Auth: 10 attempts per 15 min per IP
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { success: false, message: 'Too many auth attempts, please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// OTP: 5 sends per 10 min (per IP)
+const otpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  message: { success: false, message: 'Too many OTP requests. Please wait 10 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// Payment: 20 requests per 10 min
+const paymentLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  message: { success: false, message: 'Too many payment requests. Please wait a moment.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// Order creation: 30 per 10 min
+const orderLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  message: { success: false, message: 'Too many order requests.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// General API: 200 per 15 min
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+app.use('/api/', generalLimiter);
+
+// ─── Database connection ──────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
 .then(() => console.log('✅ MongoDB Connected Successfully'))
 .catch((err) => console.error('❌ MongoDB Connection Error:', err));
 
-// Routes
-app.use('/api/auth', require('./routes/authRoutes'));
-app.use('/api/categories', require('./routes/categoryRoutes'));
-app.use('/api/products', require('./routes/productRoutes'));
-app.use('/api/combos', require('./routes/comboRoutes'));
-app.use('/api/orders', require('./routes/orderRoutes'));
-app.use('/api/payments', require('./routes/paymentRoutes'));
-app.use('/api/admin', require('./routes/adminRoutes'));
-app.use('/api/upload', require('./routes/uploadRoutes'));
-app.use('/api/coupons', require('./routes/couponRoutes'));
-app.use('/api/reviews', require('./routes/reviewRoutes'));
-app.use('/api/banners', require('./routes/bannerRoutes'));
+// ─── Routes ───────────────────────────────────────────────────────────────────
+const authRoutes = require('./routes/authRoutes');
+app.use('/api/auth/login',         authLimiter);
+app.use('/api/auth/register',      authLimiter);
+app.use('/api/auth/send-otp',      otpLimiter);
+app.use('/api/auth/verify-otp',    otpLimiter);
+app.use('/api/auth/forgot-password', otpLimiter);
+app.use('/api/auth',               authRoutes);
 
-// Root route
+app.use('/api/categories',  require('./routes/categoryRoutes'));
+app.use('/api/products',    require('./routes/productRoutes'));
+app.use('/api/combos',      require('./routes/comboRoutes'));
+app.use('/api/orders',      orderLimiter, require('./routes/orderRoutes'));
+app.use('/api/payments',    paymentLimiter, require('./routes/paymentRoutes'));
+app.use('/api/admin',       require('./routes/adminRoutes'));
+app.use('/api/upload',      require('./routes/uploadRoutes'));
+app.use('/api/coupons',     require('./routes/couponRoutes'));
+app.use('/api/reviews',     require('./routes/reviewRoutes'));
+app.use('/api/banners',     require('./routes/bannerRoutes'));
+
+// ─── Root / Health ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ message: '🌱 Fresh Veggies API Server' });
 });
 
-// Health check endpoint for deployment platforms
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
+  res.status(200).json({
     status: 'healthy',
-    message: 'Server is running',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     env: {
-      NODE_ENV: process.env.NODE_ENV,
-      JWT_SECRET: !!process.env.JWT_SECRET,
-      MONGODB_URI: !!process.env.MONGODB_URI,
-      BREVO_SMTP_USER: !!process.env.BREVO_SMTP_USER,
-      BREVO_SMTP_PASS: !!process.env.BREVO_SMTP_PASS,
-      FRONTEND_URL: process.env.FRONTEND_URL,
-      RAZORPAY_KEY_ID: !!process.env.RAZORPAY_KEY_ID
+      NODE_ENV:        process.env.NODE_ENV,
+      JWT_SECRET:      !!process.env.JWT_SECRET,
+      MONGODB_URI:     !!process.env.MONGODB_URI,
+      FRONTEND_URL:    process.env.FRONTEND_URL,
+      RAZORPAY_KEY_ID: !!process.env.RAZORPAY_KEY_ID,
+      WEBHOOK_SECRET:  !!process.env.RAZORPAY_WEBHOOK_SECRET
     }
   });
 });
 
-// Error handling middleware
+// ─── Global error handler ─────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ 
-    success: false, 
-    message: 'Something went wrong!',
-    error: err.message 
-  });
+  res.status(500).json({ success: false, message: 'Internal server error' });
 });
 
-// Start server
+// ─── Start server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
 
-// Graceful shutdown handling
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
   server.close(() => {
-    console.log('HTTP server closed');
-    mongoose.connection.close(false, () => {
-      console.log('MongoDB connection closed');
-      process.exit(0);
-    });
+    mongoose.connection.close(false, () => process.exit(0));
   });
 });
 
 process.on('SIGINT', () => {
-  console.log('SIGINT signal received: closing HTTP server');
   server.close(() => {
-    console.log('HTTP server closed');
-    mongoose.connection.close(false, () => {
-      console.log('MongoDB connection closed');
-      process.exit(0);
-    });
+    mongoose.connection.close(false, () => process.exit(0));
   });
 });

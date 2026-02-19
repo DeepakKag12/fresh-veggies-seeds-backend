@@ -8,14 +8,15 @@ const {
   deleteCategory
 } = require('../controllers/categoryController');
 const { protect, admin } = require('../middleware/auth');
+const validateObjectId = require('../middleware/validateObjectId');
 
 router.route('/')
   .get(getCategories)
   .post(protect, admin, createCategory);
 
 router.route('/:id')
-  .get(getCategory)
-  .put(protect, admin, updateCategory)
-  .delete(protect, admin, deleteCategory);
+  .get(validateObjectId, getCategory)
+  .put(protect, admin, validateObjectId, updateCategory)
+  .delete(protect, admin, validateObjectId, deleteCategory);
 
 module.exports = router;
