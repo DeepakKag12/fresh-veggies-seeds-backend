@@ -2,6 +2,7 @@ const Order = require('../models/Order');
 const Product = require('../models/Product');
 const Combo = require('../models/Combo');
 const dtdcService = require('../services/dtdcService');
+const User = require('../models/User');
 
 // @desc    Create new order
 // @route   POST /api/orders
