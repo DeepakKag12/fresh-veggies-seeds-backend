@@ -95,16 +95,30 @@ const generalLimiter = rateLimit({
 
 app.use('/api/', generalLimiter);
 
-// ─── Database connection ──────────────────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI)
-.then(() => {
+// ─── Database connection (serverless-safe, cached) ─────────────────────────
+// Vercel runs each request in a serverless function. We cache the connection
+// across warm invocations and await it in middleware so every handler is
+// guaranteed a live connection before it executes.
+let _dbConnected = false;
+
+const connectDB = async () => {
+  if (_dbConnected || mongoose.connection.readyState >= 1) {
+    _dbConnected = true;
+    return;
+  }
+
+  await mongoose.connect(process.env.MONGODB_URI, {
+    bufferCommands: false,          // fail fast instead of queuing forever
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+  });
+
+  _dbConnected = true;
   console.log('✅ MongoDB Connected Successfully');
 
-  // ── Abandoned order cleanup ─────────────────────────────────────────
-  // Marks Online/UPI Pending orders older than 30 min as Failed.
-  // Catches: browser closed mid-payment, network drop, session timeout.
+  // ── Abandoned order cleanup (only schedule once per warm instance) ──────
   const Order = require('./models/Order');
-  const ABANDONED_TTL = 30 * 60 * 1000; // 30 minutes
+  const ABANDONED_TTL = 30 * 60 * 1000;
   const cleanupAbandonedOrders = async () => {
     try {
       const cutoff = new Date(Date.now() - ABANDONED_TTL);
@@ -118,11 +132,20 @@ mongoose.connect(process.env.MONGODB_URI)
       console.error('⚠️  Cleanup job error:', err.message);
     }
   };
-  // Run immediately on startup then every 30 minutes
   cleanupAbandonedOrders();
   setInterval(cleanupAbandonedOrders, ABANDONED_TTL);
-})
-.catch((err) => console.error('❌ MongoDB Connection Error:', err));
+};
+
+// Middleware: ensure DB is ready before any route handler runs
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('❌ MongoDB Connection Error:', err.message);
+    res.status(500).json({ success: false, message: 'Database connection failed. Please try again.' });
+  }
+});
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 const authRoutes = require('./routes/authRoutes');
