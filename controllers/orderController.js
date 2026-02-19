@@ -3,6 +3,7 @@ const Product = require('../models/Product');
 const Combo = require('../models/Combo');
 const dtdcService = require('../services/dtdcService');
 const razorpayService = require('../services/razorpayService');
+const stockService = require('../services/stockService');
 const { validateOrderItems, validateShippingAddress } = require('../utils/orderValidation');
 
 // ─── Delivery charge constants ───────────────────────────────────────────────
@@ -270,6 +271,13 @@ exports.updateOrderStatus = async (req, res) => {
     }
 
     await order.save();
+
+    // ── Decrement stock when order is confirmed (handles COD flow) ─────────
+    if (orderStatus === 'Confirmed') {
+      stockService.decrementStockAfterConfirm(order).catch((err) =>
+        console.error('⚠️  Stock decrement error:', err.message)
+      );
+    }
 
     res.status(200).json({ success: true, data: order });
   } catch (error) {

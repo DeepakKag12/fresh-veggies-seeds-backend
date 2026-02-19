@@ -193,4 +193,90 @@ exports.sendPasswordResetConfirmation = async (user) => {
   }
 };
 
+/**
+ * Send Low Stock Alert Email to Admin
+ * @param {Array<{name: string, stock: number}>} lowStockItems
+ */
+exports.sendLowStockAlertEmail = async (lowStockItems) => {
+  const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.BREVO_FROM_EMAIL;
+  const threshold  = parseInt(process.env.LOW_STOCK_THRESHOLD) || 10;
+
+  // Always log to console regardless of email config
+  console.log(`⚠️  LOW STOCK ALERT — ${lowStockItems.length} product(s) need restocking:`);
+  lowStockItems.forEach((p) =>
+    console.log(`   • ${p.name}: ${p.stock === 0 ? 'OUT OF STOCK' : `${p.stock} units left`}`)
+  );
+
+  if (!adminEmail) {
+    console.warn('⚠️  ADMIN_ALERT_EMAIL not set — low stock email not sent');
+    return { success: false, message: 'No admin email configured' };
+  }
+
+  if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_PASS) {
+    console.log('📧  Low Stock Alert (Brevo not configured — logged to console only)');
+    return { success: true, message: 'Logged to console (Brevo not configured)' };
+  }
+
+  const rows = lowStockItems
+    .map(
+      (p) => `
+    <tr>
+      <td style="padding:12px 16px;border-bottom:1px solid #f3f4f6;font-size:14px;color:#374151;">${p.name}</td>
+      <td style="padding:12px 16px;border-bottom:1px solid #f3f4f6;font-size:14px;font-weight:bold;text-align:center;color:${p.stock === 0 ? '#dc2626' : '#ea580c'};">
+        ${p.stock === 0 ? '🔴 OUT OF STOCK' : `⚠️ ${p.stock} units`}
+      </td>
+    </tr>`
+    )
+    .join('');
+
+  const adminLink = `${process.env.FRONTEND_URL || 'https://fresh-veggies-seeds-frontend.vercel.app'}/admin/products`;
+
+  const htmlContent = `
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+      <div style="background:#dc2626;padding:24px;text-align:center;color:white;">
+        <h2 style="margin:0;font-size:22px;">⚠️ Low Stock Alert</h2>
+        <p style="margin:6px 0 0;font-size:14px;opacity:0.9;">Fresh Veggies — Admin Notification</p>
+      </div>
+      <div style="padding:28px;background:#f9fafb;">
+        <p style="color:#374151;font-size:15px;margin-top:0;">
+          The following <strong>${lowStockItems.length} product${lowStockItems.length > 1 ? 's' : ''}</strong>
+          dropped below <strong>${threshold} units</strong> after a recent order was confirmed.
+          Please restock immediately.
+        </p>
+        <table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+          <thead>
+            <tr style="background:#1f2937;">
+              <th style="padding:12px 16px;text-align:left;color:white;font-size:12px;text-transform:uppercase;letter-spacing:0.05em;">Product Name</th>
+              <th style="padding:12px 16px;text-align:center;color:white;font-size:12px;text-transform:uppercase;letter-spacing:0.05em;">Stock Remaining</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div style="margin-top:28px;text-align:center;">
+          <a href="${adminLink}" style="background:#16a34a;color:white;padding:14px 32px;text-decoration:none;border-radius:6px;display:inline-block;font-weight:bold;font-size:15px;">
+            ➜ Update Stock Now
+          </a>
+        </div>
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:28px 0;">
+        <p style="color:#9ca3af;font-size:12px;text-align:center;margin:0;">
+          Automated alert from Fresh Veggies admin system · Stock threshold: ${threshold} units
+        </p>
+      </div>
+    </div>`;
+
+  try {
+    const info = await transporter.sendMail({
+      from: process.env.BREVO_FROM_EMAIL || 'noreply@freshveggies.com',
+      to: adminEmail,
+      subject: `⚠️ Low Stock Alert — ${lowStockItems.length} product${lowStockItems.length > 1 ? 's' : ''} need restocking`,
+      html: htmlContent,
+    });
+    console.log(`✅ Low Stock Alert email sent to ${adminEmail} (ID: ${info.messageId})`);
+    return { success: true };
+  } catch (error) {
+    console.error('❌ Low Stock Alert email error:', error.message);
+    return { success: false, error: error.message };
+  }
+};
+
 module.exports = exports;

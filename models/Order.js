@@ -123,7 +123,13 @@ const orderSchema = new mongoose.Schema({
     refundedAt: Date,
     reason: String
   },
-  notes: String
+  notes: String,
+  // Set to true once stock has been decremented for this order.
+  // Prevents double-decrement if webhook + verifyPayment both fire.
+  stockDecremented: {
+    type: Boolean,
+    default: false
+  }
 }, {
   timestamps: true
 });

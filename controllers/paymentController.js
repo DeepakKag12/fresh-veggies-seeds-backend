@@ -2,6 +2,7 @@ const Order = require('../models/Order');
 const Product = require('../models/Product');
 const Combo = require('../models/Combo');
 const razorpayService = require('../services/razorpayService');
+const stockService = require('../services/stockService');
 const crypto = require('crypto');
 const { validateOrderItems, validateShippingAddress } = require('../utils/orderValidation');
 
@@ -189,6 +190,11 @@ exports.verifyPayment = async (req, res) => {
     };
     await order.save();
 
+    // ── Decrement stock + send low-stock alert if needed (Online payment) ───
+    stockService.decrementStockAfterConfirm(order).catch((err) =>
+      console.error('⚠️  Stock decrement error (verifyPayment):', err.message)
+    );
+
     res.status(200).json({
       success: true,
       message: 'Payment verified and order confirmed',
@@ -261,6 +267,10 @@ exports.razorpayWebhook = async (req, res) => {
           order.paymentDetails.paidAt = new Date();
           await order.save();
           console.log(`✅ Webhook: payment.captured — order ${order._id} confirmed`);
+          // Decrement stock + alert (fire-and-forget; idempotent)
+          stockService.decrementStockAfterConfirm(order).catch((err) =>
+            console.error('⚠️  Stock decrement error (webhook):', err.message)
+          );
         }
       }
     }
