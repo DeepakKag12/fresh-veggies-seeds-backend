@@ -11,12 +11,18 @@ dotenv.config();
 // Initialize Express app
 const app = express();
 
+// Trust Vercel / proxy X-Forwarded-For headers (required for express-rate-limit
+// to work correctly when the app is behind a reverse proxy or CDN)
+app.set('trust proxy', 1);
+
 // ─── CORS Configuration ───────────────────────────────────────────────────────
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   'https://fresh-veggies-seeds-frontend.vercel.app',
   'https://fresh-veggies-seeds-frontend-git-main-deepak-kags-projects.vercel.app',
+  'https://www.freshveggies.me',
+  'https://freshveggies.me',
   process.env.FRONTEND_URL
 ].filter(Boolean);
 
