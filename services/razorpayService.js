@@ -40,28 +40,29 @@ exports.createOrder = async (amount, currency = 'INR', receipt) => {
 // Verify Payment Signature
 exports.verifyPaymentSignature = (razorpay_order_id, razorpay_payment_id, razorpay_signature) => {
   try {
-    // Create signature string
     const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
     shasum.update(`${razorpay_order_id}|${razorpay_payment_id}`);
     const digest = shasum.digest('hex');
 
-    // Compare signatures
-    if (digest === razorpay_signature) {
-      return {
-        success: true,
-        message: 'Payment verified successfully'
-      };
+    // Use timingSafeEqual to prevent timing attacks
+    let isValid = false;
+    try {
+      const digestBuf = Buffer.from(digest, 'utf8');
+      const sigBuf    = Buffer.from(razorpay_signature, 'utf8');
+      if (digestBuf.length === sigBuf.length) {
+        isValid = crypto.timingSafeEqual(digestBuf, sigBuf);
+      }
+    } catch {
+      isValid = false;
+    }
+
+    if (isValid) {
+      return { success: true,  message: 'Payment verified successfully' };
     } else {
-      return {
-        success: false,
-        message: 'Payment verification failed'
-      };
+      return { success: false, message: 'Payment verification failed' };
     }
   } catch (error) {
-    return {
-      success: false,
-      message: error.message
-    };
+    return { success: false, message: error.message };
   }
 };
 

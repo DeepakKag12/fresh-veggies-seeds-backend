@@ -150,8 +150,15 @@ exports.createOrder = async (req, res) => {
 // @access  Private
 exports.getMyOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ userId: req.user._id })
-      .sort({ createdAt: -1 });
+    // Same real-order filter as getAllOrders:
+    // COD orders are always real; Online orders only shown if payment succeeded/refunded
+    const orders = await Order.find({
+      userId: req.user._id,
+      $or: [
+        { paymentMode: 'COD' },
+        { paymentStatus: { $in: ['Paid', 'Refunded'] } }
+      ]
+    }).sort({ createdAt: -1 });
 
     res.status(200).json({
       success: true,
@@ -215,7 +222,12 @@ exports.getAllOrders = async (req, res) => {
     const rawStatus = req.query.status;
     const status = (typeof rawStatus === 'string' && VALID_STATUSES.includes(rawStatus)) ? rawStatus : null;
 
-    const query = {};
+    // Real orders: COD (always real) OR Online/UPI where payment succeeded
+    const baseFilter = { $or: [
+      { paymentMode: 'COD' },
+      { paymentStatus: { $in: ['Paid', 'Refunded'] } }
+    ]};
+    const query = { ...baseFilter };
     if (status) query.orderStatus = status;
 
     const [orders, total] = await Promise.all([
@@ -345,10 +357,7 @@ exports.approveCancellation = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No pending cancellation request for this order.' });
     }
 
-    // ── Idempotency: already cancelled/refunded means someone hit this twice ──
-    if (order.orderStatus === 'Cancelled') {
-      return res.status(409).json({ success: false, message: 'Order is already cancelled.' });
-    }
+    // ── Idempotency: abort if refund already processed (catches double-clicks) ──
     if (order.refund?.refundStatus === 'Processed') {
       return res.status(409).json({ success: false, message: 'Refund already processed for this order.' });
     }

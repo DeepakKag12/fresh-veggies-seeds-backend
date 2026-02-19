@@ -317,25 +317,40 @@ exports.razorpayWebhook = async (req, res) => {
   }
 };
 
-// @desc    Handle Payment Failure (client-side fallback)
+// @desc    Handle Payment Failure / Dismissal (client-side fallback)
 // @route   POST /api/payments/payment-failure
 // @access  Private
 exports.handlePaymentFailure = async (req, res) => {
   try {
-    const { razorpay_order_id } = req.body;
+    const { razorpay_order_id, internalOrderId } = req.body;
 
-    if (razorpay_order_id) {
-      const order = await Order.findOne({
-        'paymentDetails.razorpayOrderId': razorpay_order_id,
-        userId: req.user._id
+    let order = null;
+
+    // Prefer internalOrderId lookup (faster, more reliable)
+    if (internalOrderId) {
+      order = await Order.findOne({
+        _id: internalOrderId,
+        userId: req.user._id,
+        paymentStatus: 'Pending'
       });
-      if (order && order.paymentStatus === 'Pending') {
-        order.paymentStatus = 'Failed';
-        await order.save();
-      }
     }
 
-    res.status(200).json({ success: false, message: 'Payment failure recorded' });
+    // Fallback: lookup by Razorpay order ID
+    if (!order && razorpay_order_id) {
+      order = await Order.findOne({
+        'paymentDetails.razorpayOrderId': razorpay_order_id,
+        userId: req.user._id,
+        paymentStatus: 'Pending'
+      });
+    }
+
+    if (order) {
+      order.paymentStatus = 'Failed';
+      await order.save();
+      console.log(`❌ Payment dismissed/failed — order ${order._id} marked Failed`);
+    }
+
+    res.status(200).json({ success: true, message: 'Payment failure recorded' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

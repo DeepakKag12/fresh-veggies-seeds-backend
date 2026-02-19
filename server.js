@@ -97,7 +97,31 @@ app.use('/api/', generalLimiter);
 
 // ─── Database connection ──────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
-.then(() => console.log('✅ MongoDB Connected Successfully'))
+.then(() => {
+  console.log('✅ MongoDB Connected Successfully');
+
+  // ── Abandoned order cleanup ─────────────────────────────────────────
+  // Marks Online/UPI Pending orders older than 30 min as Failed.
+  // Catches: browser closed mid-payment, network drop, session timeout.
+  const Order = require('./models/Order');
+  const ABANDONED_TTL = 30 * 60 * 1000; // 30 minutes
+  const cleanupAbandonedOrders = async () => {
+    try {
+      const cutoff = new Date(Date.now() - ABANDONED_TTL);
+      const result = await Order.updateMany(
+        { paymentMode: { $in: ['Online', 'UPI'] }, paymentStatus: 'Pending', createdAt: { $lt: cutoff } },
+        { $set: { paymentStatus: 'Failed' } }
+      );
+      if (result.modifiedCount > 0)
+        console.log(`🧹 Cleaned up ${result.modifiedCount} abandoned online order(s)`);
+    } catch (err) {
+      console.error('⚠️  Cleanup job error:', err.message);
+    }
+  };
+  // Run immediately on startup then every 30 minutes
+  cleanupAbandonedOrders();
+  setInterval(cleanupAbandonedOrders, ABANDONED_TTL);
+})
 .catch((err) => console.error('❌ MongoDB Connection Error:', err));
 
 // ─── Routes ───────────────────────────────────────────────────────────────────

@@ -16,6 +16,9 @@ exports.getDashboardStats = async (req, res) => {
     const lastMonthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
     const lastMonthEnd   = new Date(today.getFullYear(), today.getMonth(), 0, 23, 59, 59);
 
+    // Real orders = COD (always real) OR Online/UPI with payment confirmed/refunded
+    const realOrder = { $or: [{ paymentMode: 'COD' }, { paymentStatus: { $in: ['Paid', 'Refunded'] } }] };
+
     // ── Run all queries in parallel ───────────────────────────────────────────
     const [
       totalOrders, totalUsers, totalProducts,
@@ -28,20 +31,20 @@ exports.getDashboardStats = async (req, res) => {
       revMonth, revLastMonth,
       revMonthOnline, revMonthCOD
     ] = await Promise.all([
-      Order.countDocuments(),
+      Order.countDocuments(realOrder),
       User.countDocuments({ role: 'customer' }),
       Product.countDocuments(),
 
-      Order.countDocuments({ orderStatus: 'Pending' }),
-      Order.countDocuments({ orderStatus: 'Confirmed' }),
-      Order.countDocuments({ orderStatus: 'Shipped' }),
-      Order.countDocuments({ orderStatus: 'Delivered' }),
-      Order.countDocuments({ orderStatus: 'Cancelled' }),
-      Order.countDocuments({ orderStatus: 'CancellationRequested' }),
+      Order.countDocuments({ ...realOrder, orderStatus: 'Pending'               }),
+      Order.countDocuments({ ...realOrder, orderStatus: 'Confirmed'             }),
+      Order.countDocuments({ ...realOrder, orderStatus: 'Shipped'               }),
+      Order.countDocuments({ ...realOrder, orderStatus: 'Delivered'             }),
+      Order.countDocuments({ ...realOrder, orderStatus: 'Cancelled'             }),
+      Order.countDocuments({ ...realOrder, orderStatus: 'CancellationRequested' }),
       Order.countDocuments({ paymentStatus: 'Failed' }),
       Product.countDocuments({ stock: { $lt: 10 } }),
       Review.countDocuments({ isApproved: false }),
-      Order.countDocuments({ createdAt: { $gte: today } }),
+      Order.countDocuments({ ...realOrder, createdAt: { $gte: today } }),
 
       // ── Revenue: only Paid orders ─────────────────────────────────────────
       Order.aggregate([{ $match: { paymentStatus: 'Paid' } },
