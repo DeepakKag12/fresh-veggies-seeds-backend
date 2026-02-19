@@ -5,44 +5,45 @@ const Product = require('../models/Product');
 // @access  Public
 exports.getProducts = async (req, res) => {
   try {
-    const { category, season, search, sort, page = 1, limit = 12 } = req.query;
-    
+    // ── Sanitize query params — reject operator-injection objects (e.g. ?category[$ne]=x) ──
+    const toStr = (val) => (val && typeof val === 'string' ? val.trim() : null);
+    const category = toStr(req.query.category);
+    const season   = toStr(req.query.season);
+    const search   = toStr(req.query.search);
+    const sort     = toStr(req.query.sort);
+    const page     = Math.max(1, parseInt(req.query.page)  || 1);
+    const limit    = Math.min(50, Math.max(1, parseInt(req.query.limit) || 12)); // max 50
+
     const query = { isActive: true };
 
-    // Filter by category
+    // Filter by category — value is a plain string (ObjectId); never an object
     if (category) {
       query.categoryId = category;
     }
 
-    // Filter by season
-    if (season) {
+    // Filter by season — plain string whitelist
+    const ALLOWED_SEASONS = ['Summer', 'Winter', 'Monsoon', 'AllSeason', 'Spring'];
+    if (season && ALLOWED_SEASONS.includes(season)) {
       query.season = season;
     }
 
     // Search by name (with fuzzy matching for misspellings)
     if (search) {
-      // Split search into words for better matching
-      const searchWords = search.split(' ').filter(word => word.length > 0);
-      
-      // Create regex patterns for each word (allows partial matches)
-      const regexPatterns = searchWords.map(word => {
-        // Escape special regex characters
-        const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Allow for minor typos: optional characters and flexible character matching
-        return new RegExp(escaped, 'i');
-      });
-      
-      // Match if name or description contains any of the search words
+      // Escape special regex characters to prevent ReDoS
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 100);
+      const searchWords = escaped.split(' ').filter(w => w.length > 0);
+
+      const regexPatterns = searchWords.map(word => new RegExp(word, 'i'));
+
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } },
-        // Also try matching individual words
+        { name: { $regex: escaped, $options: 'i' } },
+        { description: { $regex: escaped, $options: 'i' } },
         ...regexPatterns.map(pattern => ({ name: pattern })),
         ...regexPatterns.map(pattern => ({ description: pattern }))
       ];
     }
 
-    // Sorting
+    // Sorting — whitelist only; never allow arbitrary field injection
     let sortOption = {};
     if (sort === 'price-low') sortOption.price = 1;
     else if (sort === 'price-high') sortOption.price = -1;
@@ -52,7 +53,7 @@ exports.getProducts = async (req, res) => {
     const products = await Product.find(query)
       .populate('categoryId', 'name slug')
       .sort(sortOption)
-      .limit(limit * 1)
+      .limit(limit)
       .skip((page - 1) * limit);
 
     const count = await Product.countDocuments(query);
@@ -69,8 +70,7 @@ exports.getProducts = async (req, res) => {
     console.error('❌ getProducts error:', error.message, error.stack);
     res.status(500).json({
       success: false,
-      message: error.message,
-      detail: error.stack
+      message: 'Failed to fetch products'
     });
   }
 };

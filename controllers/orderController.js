@@ -208,7 +208,11 @@ exports.getAllOrders = async (req, res) => {
     const page   = Math.max(1, parseInt(req.query.page)  || 1);
     const limit  = Math.min(100, parseInt(req.query.limit) || 20);
     const skip   = (page - 1) * limit;
-    const status = req.query.status; // optional filter by orderStatus
+
+    // Whitelist status values — never pass raw query objects into Mongoose
+    const VALID_STATUSES = ['Pending','Confirmed','Packed','Shipped','Delivered','Cancelled','CancellationRequested'];
+    const rawStatus = req.query.status;
+    const status = (typeof rawStatus === 'string' && VALID_STATUSES.includes(rawStatus)) ? rawStatus : null;
 
     const query = {};
     if (status) query.orderStatus = status;

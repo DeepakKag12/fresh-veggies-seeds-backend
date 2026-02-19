@@ -11,7 +11,7 @@ const { protect, admin } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 
 router.get('/admin', protect, admin, getAllReviews);
-router.get('/product/:productId', getProductReviews);
+router.get('/product/:productId', validateObjectId('productId'), getProductReviews);
 
 router.post('/', protect, createReview);
 router.put('/:id/approve', protect, admin, validateObjectId, approveReview);
