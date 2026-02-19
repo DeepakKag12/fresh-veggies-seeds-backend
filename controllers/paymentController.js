@@ -259,18 +259,25 @@ exports.razorpayWebhook = async (req, res) => {
       const paymentId     = paymentEntity?.id;
 
       if (rzpOrderId) {
-        const order = await Order.findOne({ 'paymentDetails.razorpayOrderId': rzpOrderId });
-        if (order && order.paymentStatus !== 'Paid') {
-          order.paymentStatus = 'Paid';
-          order.orderStatus   = 'Confirmed';
-          order.paymentDetails.razorpayPaymentId = paymentId;
-          order.paymentDetails.paidAt = new Date();
-          await order.save();
+        // Atomic: only updates if still Pending — prevents race with verifyPayment
+        const order = await Order.findOneAndUpdate(
+          { 'paymentDetails.razorpayOrderId': rzpOrderId, paymentStatus: 'Pending' },
+          { $set: {
+              paymentStatus: 'Paid',
+              orderStatus:   'Confirmed',
+              'paymentDetails.razorpayPaymentId': paymentId,
+              'paymentDetails.paidAt':           new Date()
+          }},
+          { new: true }
+        );
+        if (order) {
           console.log(`✅ Webhook: payment.captured — order ${order._id} confirmed`);
-          // Decrement stock + alert (fire-and-forget; idempotent)
           stockService.decrementStockAfterConfirm(order).catch((err) =>
             console.error('⚠️  Stock decrement error (webhook):', err.message)
           );
+        } else {
+          // Already Paid by verifyPayment — still 200 so Razorpay doesn't retry
+          console.log(`ℹ️  Webhook: payment.captured — order already confirmed (rzpOrderId=${rzpOrderId})`);
         }
       }
     }
@@ -356,51 +363,72 @@ exports.handlePaymentFailure = async (req, res) => {
   }
 };
 
-// @desc    Refund Payment (Admin manual — idempotent)
+// @desc    Refund Payment (Admin manual — idempotent, race-safe)
 // @route   POST /api/payments/refund
 // @access  Private/Admin
 exports.refundPayment = async (req, res) => {
   try {
     const { orderId, reason } = req.body;
 
-    const order = await Order.findById(orderId);
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (order.paymentStatus !== 'Paid') {
-      return res.status(400).json({ success: false, message: 'Order is not in a paid state' });
+    // ── Atomic claim: only one request can ever enter the refund path ─────────
+    // Transitions refundStatus from (no refund) → 'Pending' as an atomic op.
+    // A second concurrent request finds refundStatus already set → 409.
+    const order = await Order.findOneAndUpdate(
+      {
+        _id:           orderId,
+        paymentStatus: 'Paid',
+        'refund.refundStatus': { $exists: false }  // no refund record yet
+      },
+      { $set: { 'refund.refundStatus': 'Pending', 'refund.refundAmount': 0 } },
+      { new: true }
+    );
+
+    if (!order) {
+      // Distinguish between "not found" and "already refunded"
+      const existing = await Order.findById(orderId);
+      if (!existing)                              return res.status(404).json({ success: false, message: 'Order not found' });
+      if (existing.paymentStatus !== 'Paid')      return res.status(400).json({ success: false, message: 'Order is not in a paid state' });
+      if (existing.refund?.refundStatus === 'Processed')
+        return res.status(409).json({ success: false, message: 'Refund already processed for this order', data: existing.refund });
+      return res.status(409).json({ success: false, message: 'Refund already in progress' });
     }
 
-    // ── Idempotency guard ─────────────────────────────────────────────────────
-    if (order.refund?.refundStatus === 'Processed') {
-      return res.status(409).json({
-        success: false,
-        message: 'Refund already processed for this order',
-        data: order.refund
-      });
-    }
-
-    const paymentId   = order.paymentDetails?.razorpayPaymentId;
+    const paymentId    = order.paymentDetails?.razorpayPaymentId;
     const refundAmount = order.totalAmount;
 
     if (!paymentId) {
+      // Roll back the Pending flag so admin can retry
+      await Order.updateOne({ _id: orderId }, { $unset: { refund: '' } });
       return res.status(400).json({ success: false, message: 'No Razorpay payment ID found on this order' });
     }
 
     const refundResponse = await razorpayService.refundPayment(paymentId, refundAmount);
+
     if (!refundResponse.success) {
+      // Mark as Failed so admin sees it, but don't leave it stuck as Pending
+      await Order.updateOne({ _id: orderId }, { $set: {
+        'refund.refundStatus': 'Failed',
+        'refund.refundAmount': refundAmount,
+        'refund.reason':       refundResponse.message
+      }});
       return res.status(400).json({ success: false, message: refundResponse.message });
     }
 
-    order.paymentStatus  = 'Refunded';
-    order.orderStatus    = 'Cancelled';
-    order.cancelledAt    = new Date();
-    order.refund = {
-      refundId:     refundResponse.data.id,
-      refundAmount,
-      refundStatus: 'Processed',
-      refundedAt:   new Date(),
-      reason:       reason || 'Admin initiated refund'
-    };
-    await order.save();
+    // ── Razorpay confirmed — persist full refund record ───────────────────────
+    const updatedOrder = await Order.findByIdAndUpdate(
+      orderId,
+      { $set: {
+          paymentStatus:          'Refunded',
+          orderStatus:            'Cancelled',
+          cancelledAt:            new Date(),
+          'refund.refundId':      refundResponse.data.id,
+          'refund.refundAmount':  refundAmount,
+          'refund.refundStatus':  'Processed',
+          'refund.refundedAt':    new Date(),
+          'refund.reason':        reason || 'Admin initiated refund'
+      }},
+      { new: true }
+    );
 
     res.status(200).json({
       success: true,

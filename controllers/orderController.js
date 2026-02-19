@@ -347,73 +347,86 @@ exports.cancelOrder = async (req, res) => {
 // @access  Private/Admin
 exports.approveCancellation = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id);
+    // ── Atomic claim: transition orderStatus AND lock the refund slot in one op ─
+    // This prevents two simultaneous admin clicks from both calling Razorpay.
+    const order = await Order.findOneAndUpdate(
+      {
+        _id:         req.params.id,
+        orderStatus: 'CancellationRequested',
+        'refund.refundStatus': { $exists: false }  // no refund attempt yet
+      },
+      { $set: {
+          orderStatus:              'Cancelled',
+          cancelledAt:              new Date(),
+          'refund.refundStatus':    'Pending',
+          'refund.refundAmount':    0
+      }},
+      { new: true }
+    );
 
     if (!order) {
-      return res.status(404).json({ success: false, message: 'Order not found' });
+      const existing = await Order.findById(req.params.id);
+      if (!existing) return res.status(404).json({ success: false, message: 'Order not found' });
+      if (existing.orderStatus !== 'CancellationRequested')
+        return res.status(400).json({ success: false, message: 'No pending cancellation request for this order.' });
+      return res.status(409).json({ success: false, message: 'Cancellation already in progress or refund already initiated.' });
     }
 
-    if (order.orderStatus !== 'CancellationRequested') {
-      return res.status(400).json({ success: false, message: 'No pending cancellation request for this order.' });
-    }
-
-    // ── Idempotency: abort if refund already processed (catches double-clicks) ──
-    if (order.refund?.refundStatus === 'Processed') {
-      return res.status(409).json({ success: false, message: 'Refund already processed for this order.' });
-    }
-
-    // Cancel DTDC shipment if shipped
-    if (order.shipping && order.shipping.awbNumber) {
-      await dtdcService.cancelShipment(order.shipping.awbNumber).catch(err =>
+    // Cancel DTDC shipment if shipped (fire-and-forget)
+    if (order.shipping?.awbNumber) {
+      dtdcService.cancelShipment(order.shipping.awbNumber).catch(err =>
         console.error('DTDC cancel error:', err.message)
       );
     }
 
-    order.orderStatus = 'Cancelled';
-    order.cancelledAt = new Date();
-
-    // Auto-refund for online paid orders only — guarded against double-refund
+    // ── Auto-refund for online paid orders ────────────────────────────────────
     if (order.paymentMode === 'Online' && order.paymentStatus === 'Paid') {
       const paymentId = order.paymentDetails?.razorpayPaymentId;
       if (paymentId) {
+        let refundData = {};
         try {
           const refundResponse = await razorpayService.refundPayment(paymentId, order.totalAmount);
           if (refundResponse.success) {
-            order.paymentStatus = 'Refunded';
-            order.refund = {
-              refundId: refundResponse.data.id,
-              refundAmount: order.totalAmount,
-              refundStatus: 'Processed',
-              refundedAt: new Date(),
-              reason: order.cancellationRequest?.reason || 'Admin approved cancellation'
+            refundData = {
+              'paymentStatus':         'Refunded',
+              'refund.refundId':       refundResponse.data.id,
+              'refund.refundAmount':   order.totalAmount,
+              'refund.refundStatus':   'Processed',
+              'refund.refundedAt':     new Date(),
+              'refund.reason':         order.cancellationRequest?.reason || 'Admin approved cancellation'
             };
           } else {
-            order.refund = {
-              refundAmount: order.totalAmount,
-              refundStatus: 'Failed',
-              reason: refundResponse.message
+            refundData = {
+              'refund.refundAmount':  order.totalAmount,
+              'refund.refundStatus':  'Failed',
+              'refund.reason':        refundResponse.message
             };
           }
         } catch (refundError) {
           console.error('Refund error:', refundError.message);
-          order.refund = {
-            refundAmount: order.totalAmount,
-            refundStatus: 'Failed',
-            reason: refundError.message
+          refundData = {
+            'refund.refundAmount':  order.totalAmount,
+            'refund.refundStatus':  'Failed',
+            'refund.reason':        refundError.message
           };
         }
+        // Persist final refund state
+        await Order.updateOne({ _id: order._id }, { $set: refundData });
+        Object.assign(order, refundData); // update local copy for response
       }
+    } else {
+      // COD or unpaid — clear the pending refund placeholder
+      await Order.updateOne({ _id: order._id }, { $unset: { refund: '' } });
     }
 
-    await order.save();
-
-    const refundMsg = order.refund?.refundStatus === 'Processed'
+    const finalOrder = await Order.findById(order._id);
+    const refundMsg  = finalOrder.refund?.refundStatus === 'Processed'
       ? ` Refund of ₹${order.totalAmount} initiated — credits in 5-7 business days.`
       : '';
 
     res.status(200).json({
       success: true,
-      data: order,
+      data:    finalOrder,
       message: `Cancellation approved.${refundMsg}`
     });
   } catch (error) {
