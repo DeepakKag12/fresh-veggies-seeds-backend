@@ -3,6 +3,10 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const emailService = require('../services/emailService');
 
+const getFrontendUrl = () => (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes('localhost'))
+  ? process.env.FRONTEND_URL
+  : 'https://fresh-veggies-seeds-frontend.vercel.app';
+
 // Generate JWT Token
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -16,9 +20,11 @@ const generateToken = (id) => {
 exports.register = async (req, res) => {
   try {
     const { name, phone, email, password } = req.body;
+    const normalizedEmail = email?.trim().toLowerCase();
+    const normalizedPhone = phone?.trim();
 
     // Validate input
-    if (!name || !phone || !email || !password) {
+    if (!name || !normalizedPhone || !normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
         message: 'Please provide all required fields: name, phone, email, password'
@@ -26,8 +32,8 @@ exports.register = async (req, res) => {
     }
 
     // Check if user exists
-    const existingEmail = await User.findOne({ email });
-    const existingPhone = await User.findOne({ phone });
+    const existingEmail = await User.findOne({ email: normalizedEmail });
+    const existingPhone = await User.findOne({ phone: normalizedPhone });
     
     if (existingEmail) {
       return res.status(400).json({
@@ -43,24 +49,29 @@ exports.register = async (req, res) => {
       });
     }
 
-    // Create user
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationUrl = `${getFrontendUrl()}/verify-email/${verificationToken}`;
+
+    // Create user without issuing a session until email ownership is verified.
     const user = await User.create({
       name,
-      phone,
-      email,
-      password
+      phone: normalizedPhone,
+      email: normalizedEmail,
+      password,
+      emailVerified: false,
+      emailVerificationToken: crypto.createHash('sha256').update(verificationToken).digest('hex'),
+      emailVerificationExpires: Date.now() + 24 * 60 * 60 * 1000
     });
+
+    const emailResult = await emailService.sendVerificationEmail(user, verificationUrl);
+    if (!emailResult.success) {
+      await User.findByIdAndDelete(user._id);
+      return res.status(500).json({ success: false, message: 'Unable to send verification email. Please try again later.' });
+    }
 
     res.status(201).json({
       success: true,
-      data: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        token: generateToken(user._id)
-      }
+      message: 'Registration successful. Please verify your email before logging in.'
     });
   } catch (error) {
     res.status(500).json({
@@ -76,9 +87,10 @@ exports.register = async (req, res) => {
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
+    const normalizedEmail = email?.trim().toLowerCase();
 
     // Validate input
-    if (!email || !password) {
+    if (!normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
         message: 'Please provide email and password'
@@ -86,11 +98,18 @@ exports.login = async (req, res) => {
     }
 
     // Find user with password
-    const user = await User.findOne({ email }).select('+password');
+    const user = await User.findOne({ email: normalizedEmail }).select('+password');
     if (!user) {
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
+      });
+    }
+
+    if (user.emailVerified === false) {
+      return res.status(403).json({
+        success: false,
+        message: 'Please verify your email address before logging in.'
       });
     }
 
@@ -147,12 +166,38 @@ exports.login = async (req, res) => {
   }
 };
 
+// @desc    Verify email ownership
+// @route   GET /api/auth/verify-email/:token
+// @access  Public
+exports.verifyEmail = async (req, res) => {
+  try {
+    const hashedToken = crypto.createHash('sha256').update(req.params.token).digest('hex');
+    const user = await User.findOne({
+      emailVerificationToken: hashedToken,
+      emailVerificationExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ success: false, message: 'This verification link is invalid or expired.' });
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save({ validateBeforeSave: false });
+
+    res.status(200).json({ success: true, message: 'Email verified successfully. You can now log in.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Get current user
 // @route   GET /api/auth/me
 // @access  Private
 exports.getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findById(req.user._id).select('-emailVerificationToken -emailVerificationExpires -resetPasswordToken -resetPasswordExpires -otpToken -otpExpires');
     res.status(200).json({
       success: true,
       data: user
@@ -162,6 +207,34 @@ exports.getMe = async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+};
+
+// @desc    Get the current user's cart
+// @route   GET /api/auth/cart
+// @access  Private
+exports.getCart = async (req, res) => {
+  res.status(200).json({ success: true, data: req.user.cart || [] });
+};
+
+// @desc    Save the current user's cart
+// @route   PUT /api/auth/cart
+// @access  Private
+exports.updateCart = async (req, res) => {
+  try {
+    if (!Array.isArray(req.body.cart)) {
+      return res.status(400).json({ success: false, message: 'Cart must be an array' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { cart: req.body.cart },
+      { new: true, runValidators: true }
+    ).select('cart');
+
+    res.status(200).json({ success: true, data: user.cart });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -196,9 +269,10 @@ exports.updateProfile = async (req, res) => {
 exports.changeEmail = async (req, res) => {
   try {
     const { newEmail, password } = req.body;
+    const normalizedEmail = newEmail?.trim().toLowerCase();
 
     // Validate input
-    if (!newEmail || !password) {
+    if (!normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
         message: 'Please provide new email and current password'
@@ -218,7 +292,7 @@ exports.changeEmail = async (req, res) => {
     }
 
     // Check if new email already exists
-    const existingEmail = await User.findOne({ email: newEmail });
+    const existingEmail = await User.findOne({ email: normalizedEmail });
     if (existingEmail && existingEmail._id.toString() !== user._id.toString()) {
       return res.status(400).json({
         success: false,
@@ -226,13 +300,24 @@ exports.changeEmail = async (req, res) => {
       });
     }
 
-    // Update email
-    user.email = newEmail;
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    user.email = normalizedEmail;
+    user.emailVerified = false;
+    user.emailVerificationToken = crypto.createHash('sha256').update(verificationToken).digest('hex');
+    user.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000;
     await user.save();
+
+    const emailResult = await emailService.sendVerificationEmail(
+      user,
+      `${getFrontendUrl()}/verify-email/${verificationToken}`
+    );
+    if (!emailResult.success) {
+      return res.status(500).json({ success: false, message: 'Email changed, but verification email could not be sent.' });
+    }
 
     res.status(200).json({
       success: true,
-      message: 'Email updated successfully',
+      message: 'Email updated. Please verify your new email address before logging in again.',
       data: {
         _id: user._id,
         name: user.name,
@@ -448,6 +533,10 @@ exports.sendOTP = async (req, res) => {
         success: false,
         message: 'No account found with this phone number. Please register first.'
       });
+    }
+
+    if (user.emailVerified === false) {
+      return res.status(403).json({ success: false, message: 'Please verify your email address before using OTP login.' });
     }
 
     // Check if account is locked

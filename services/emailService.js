@@ -17,6 +17,31 @@ let transporter = nodemailer.createTransport({
   }
 });
 
+exports.sendVerificationEmail = async (user, verificationUrl) => {
+  try {
+    if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_PASS) {
+      console.log(`Email verification URL for ${user.email}: ${verificationUrl}`);
+      return { success: true, message: 'Email logged to console (Brevo not configured)' };
+    }
+
+    await transporter.sendMail({
+      from: process.env.BREVO_FROM_EMAIL || 'noreply@freshveggies.com',
+      to: user.email,
+      subject: 'Verify your Fresh Veggies email address',
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:30px">
+        <h2>Welcome to Fresh Veggies, ${user.name}!</h2>
+        <p>Please verify that you own this email address to activate your account.</p>
+        <p><a href="${verificationUrl}" style="background:#16a34a;color:white;padding:12px 24px;text-decoration:none;border-radius:5px;display:inline-block">Verify Email</a></p>
+        <p>This link expires in 24 hours and can only be used once.</p>
+      </div>`
+    });
+    return { success: true, message: 'Verification email sent' };
+  } catch (error) {
+    console.error('Error sending verification email:', error.message);
+    return { success: false, message: 'Failed to send verification email', error: error.message };
+  }
+};
+
 /**
  * Send Forgot Password Email
  * @param {Object} user - User object

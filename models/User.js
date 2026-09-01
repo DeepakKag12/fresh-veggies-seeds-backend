@@ -19,6 +19,12 @@ const userSchema = new mongoose.Schema({
     unique: true,
     lowercase: true
   },
+  emailVerified: {
+    type: Boolean,
+    default: false
+  },
+  emailVerificationToken: String,
+  emailVerificationExpires: Date,
   password: {
     type: String,
     required: [true, 'Please provide password'],
@@ -31,6 +37,10 @@ const userSchema = new mongoose.Schema({
     state: String,
     pincode: String,
     country: { type: String, default: 'India' }
+  },
+  cart: {
+    type: [mongoose.Schema.Types.Mixed],
+    default: []
   },
   role: {
     type: String,
