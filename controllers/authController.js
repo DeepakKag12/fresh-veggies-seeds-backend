@@ -2,16 +2,27 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const emailService = require('../services/emailService');
+const { isValidEmail, isValidPhone, validatePassword, validateCart, cleanText } = require('../utils/validators');
+// Email verification is opt-in. It is off by default so a store can run without
+// SMTP configured; set REQUIRE_EMAIL_VERIFICATION=true to enforce it.
+const requireEmailVerification = () =>
+  String(process.env.REQUIRE_EMAIL_VERIFICATION || '').toLowerCase() === 'true';
+
+const { serverError } = require('../utils/respond');
 
 const getFrontendUrl = () => (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes('localhost'))
   ? process.env.FRONTEND_URL
   : 'https://fresh-veggies-seeds-frontend.vercel.app';
 
-// Generate JWT Token
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE
-  });
+// Generate JWT Token.
+// `tv` pins the token to the user's current tokenVersion, so a password change
+// or an explicit logout-everywhere immediately invalidates it (see middleware/auth.js).
+const generateToken = (user) => {
+  return jwt.sign(
+    { id: user._id, tv: user.tokenVersion || 0 },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRE || '7d' }
+  );
 };
 
 // @desc    Register new user
@@ -23,7 +34,7 @@ exports.register = async (req, res) => {
     const normalizedEmail = email?.trim().toLowerCase();
     const normalizedPhone = phone?.trim();
 
-    // Validate input
+    // ── Validation ────────────────────────────────────────────────────────────
     if (!name || !normalizedPhone || !normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
@@ -31,19 +42,40 @@ exports.register = async (req, res) => {
       });
     }
 
-    // Check if user exists
-    const existingEmail = await User.findOne({ email: normalizedEmail });
-    const existingPhone = await User.findOne({ phone: normalizedPhone });
-    
+    const cleanName = cleanText(name, 100);
+    if (cleanName.length < 2) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid name.' });
+    }
+
+    // The schema only lowercases the email — it never checked the shape, so
+    // "notanemail" registered fine and then silently failed every send.
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid email address.' });
+    }
+
+    if (!isValidPhone(normalizedPhone)) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid 10-digit Indian mobile number.' });
+    }
+
+    const pwCheck = validatePassword(password);
+    if (!pwCheck.valid) {
+      return res.status(400).json({ success: false, message: pwCheck.message });
+    }
+
+    // Friendly pre-check. It cannot be authoritative — two concurrent
+    // registrations both pass it — so the unique index is the real guard and
+    // the duplicate-key error is translated to a 409 by the error handler.
+    const existingEmail = await User.findOne({ email: normalizedEmail }).lean();
     if (existingEmail) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         message: 'An account with this email already exists. Please login or use a different email.'
       });
     }
-    
+
+    const existingPhone = await User.findOne({ phone: normalizedPhone }).lean();
     if (existingPhone) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         message: 'An account with this phone number already exists. Please login or use a different number.'
       });
@@ -52,32 +84,41 @@ exports.register = async (req, res) => {
     const verificationToken = crypto.randomBytes(32).toString('hex');
     const verificationUrl = `${getFrontendUrl()}/verify-email/${verificationToken}`;
 
-    // Create user without issuing a session until email ownership is verified.
+    const mustVerify = requireEmailVerification();
+
     const user = await User.create({
-      name,
+      name: cleanName,
       phone: normalizedPhone,
       email: normalizedEmail,
       password,
-      emailVerified: false,
-      emailVerificationToken: crypto.createHash('sha256').update(verificationToken).digest('hex'),
-      emailVerificationExpires: Date.now() + 24 * 60 * 60 * 1000
+      emailVerified: !mustVerify,
+      ...(mustVerify ? {
+        emailVerificationToken: crypto.createHash('sha256').update(verificationToken).digest('hex'),
+        emailVerificationExpires: Date.now() + 24 * 60 * 60 * 1000,
+      } : {}),
     });
 
-    const emailResult = await emailService.sendVerificationEmail(user, verificationUrl);
-    if (!emailResult.success) {
-      await User.findByIdAndDelete(user._id);
-      return res.status(500).json({ success: false, message: 'Unable to send verification email. Please try again later.' });
+    if (mustVerify) {
+      const emailResult = await emailService.sendVerificationEmail(user, verificationUrl);
+      if (!emailResult.success) {
+        // Only meaningful while verification is required: without the email the
+        // account could never be used, so it is rolled back.
+        await User.findByIdAndDelete(user._id);
+        return res.status(500).json({ success: false, message: 'Unable to send verification email. Please try again later.' });
+      }
+    } else {
+      // Best-effort welcome; a mail failure must not fail the signup.
+      emailService.sendVerificationEmail(user, verificationUrl).catch(() => {});
     }
 
     res.status(201).json({
       success: true,
-      message: 'Registration successful. Please verify your email before logging in.'
+      message: mustVerify
+        ? 'Registration successful. Please verify your email before logging in.'
+        : 'Account created. You can sign in now.'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController.js → register');
   }
 };
 
@@ -100,13 +141,17 @@ exports.login = async (req, res) => {
     // Find user with password
     const user = await User.findOne({ email: normalizedEmail }).select('+password');
     if (!user) {
+      // Deliberately identical to the wrong-password response below. Returning a
+      // distinguishable message here let anyone probe which emails have accounts.
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Invalid email or password.'
       });
     }
 
-    if (user.emailVerified === false) {
+    // Accounts created before verification was switched off, and every account
+    // when it is off, sign in normally.
+    if (requireEmailVerification() && user.emailVerified === false) {
       return res.status(403).json({
         success: false,
         message: 'Please verify your email address before logging in.'
@@ -125,25 +170,24 @@ exports.login = async (req, res) => {
     // Check password
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      // Increment login attempts
       await user.incrementLoginAttempts();
-      
-      // Fetch updated user to check if now locked
-      const updatedUser = await User.findById(user._id);
-      
-      let attemptsRemaining = 5 - updatedUser.loginAttempts;
-      if (attemptsRemaining < 0) attemptsRemaining = 0;
-      
       return res.status(401).json({
         success: false,
-        message: `Invalid credentials. ${attemptsRemaining} attempts remaining.`
+        message: 'Invalid email or password.'
+      });
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'Account has been deactivated. Please contact support.'
       });
     }
 
     // Reset login attempts on successful login
     await user.resetLoginAttempts();
 
-    const token = generateToken(user._id);
+    const token = generateToken(user);
 
     res.status(200).json({
       success: true,
@@ -158,11 +202,9 @@ exports.login = async (req, res) => {
       }
     });
   } catch (error) {
+    // Log the detail server-side; never tell a client about our configuration.
     console.error('❌ LOGIN ERROR:', error.message, '| JWT_SECRET set:', !!process.env.JWT_SECRET);
-    res.status(500).json({
-      success: false,
-      message: !process.env.JWT_SECRET ? 'JWT_SECRET environment variable not configured' : error.message
-    });
+    res.status(500).json({ success: false, message: 'Unable to log in right now. Please try again.' });
   }
 };
 
@@ -188,7 +230,7 @@ exports.verifyEmail = async (req, res) => {
 
     res.status(200).json({ success: true, message: 'Email verified successfully. You can now log in.' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'authController.js → verifyEmail');
   }
 };
 
@@ -203,10 +245,7 @@ exports.getMe = async (req, res) => {
       data: user
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController.js → getMe');
   }
 };
 
@@ -222,8 +261,11 @@ exports.getCart = async (req, res) => {
 // @access  Private
 exports.updateCart = async (req, res) => {
   try {
-    if (!Array.isArray(req.body.cart)) {
-      return res.status(400).json({ success: false, message: 'Cart must be an array' });
+    // `cart` is a Mixed array, so without this a client could persist arbitrary
+    // unbounded JSON into their own user document.
+    const cartCheck = validateCart(req.body.cart);
+    if (!cartCheck.valid) {
+      return res.status(400).json({ success: false, message: cartCheck.message });
     }
 
     const user = await User.findByIdAndUpdate(
@@ -234,7 +276,7 @@ exports.updateCart = async (req, res) => {
 
     res.status(200).json({ success: true, data: user.cart });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'authController.js → updateCart');
   }
 };
 
@@ -244,10 +286,52 @@ exports.updateCart = async (req, res) => {
 exports.updateProfile = async (req, res) => {
   try {
     const { name, phone, address } = req.body;
+    const updates = {};
+
+    if (name !== undefined) {
+      const cleanName = cleanText(name, 100);
+      if (cleanName.length < 2) {
+        return res.status(400).json({ success: false, message: 'Please provide a valid name.' });
+      }
+      updates.name = cleanName;
+    }
+
+    if (phone !== undefined) {
+      const trimmedPhone = String(phone).trim();
+      if (!isValidPhone(trimmedPhone)) {
+        return res.status(400).json({ success: false, message: 'Please provide a valid 10-digit Indian mobile number.' });
+      }
+      // `unique` is an index, not a validator, so runValidators does not catch
+      // this — an unchecked duplicate surfaced as a raw E11000 500.
+      const taken = await User.findOne({ phone: trimmedPhone, _id: { $ne: req.user._id } }).lean();
+      if (taken) {
+        return res.status(409).json({ success: false, message: 'That phone number is already in use.' });
+      }
+      updates.phone = trimmedPhone;
+    }
+
+    if (address !== undefined) {
+      if (typeof address !== 'object' || address === null || Array.isArray(address)) {
+        return res.status(400).json({ success: false, message: 'Address must be an object.' });
+      }
+      // Whitelist: assigning req.body.address wholesale let a client write
+      // arbitrary keys into the sub-document.
+      updates.address = {
+        street:  cleanText(address.street, 200),
+        city:    cleanText(address.city, 100),
+        state:   cleanText(address.state, 100),
+        pincode: cleanText(address.pincode, 10),
+        country: cleanText(address.country, 100) || 'India'
+      };
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'Nothing to update.' });
+    }
 
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { name, phone, address },
+      updates,
       { new: true, runValidators: true }
     );
 
@@ -256,10 +340,7 @@ exports.updateProfile = async (req, res) => {
       data: user
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController.js → updateProfile');
   }
 };
 
@@ -327,10 +408,7 @@ exports.changeEmail = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController.js → changeEmail');
   }
 };
 
@@ -349,11 +427,15 @@ exports.changePassword = async (req, res) => {
       });
     }
 
-    // Validate new password length
-    if (newPassword.length < 6) {
+    const pwCheck = validatePassword(newPassword);
+    if (!pwCheck.valid) {
+      return res.status(400).json({ success: false, message: pwCheck.message });
+    }
+
+    if (currentPassword === newPassword) {
       return res.status(400).json({
         success: false,
-        message: 'New password must be at least 6 characters long'
+        message: 'New password must be different from your current password.'
       });
     }
 
@@ -376,13 +458,10 @@ exports.changePassword = async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Password updated successfully',
-      token: generateToken(user._id)
+      token: generateToken(user)
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController.js → changePassword');
   }
 };
 
@@ -400,12 +479,16 @@ exports.forgotPassword = async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'No account found with this email address'
-      });
+    // Always answer the same way whether or not the account exists — a 404 here
+    // turned this endpoint into a free "does this email have an account?" oracle.
+    const genericResponse = {
+      success: true,
+      message: 'If an account exists for that email, a password reset link has been sent.'
+    };
+
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user || !user.isActive) {
+      return res.status(200).json(genericResponse);
     }
 
     // Generate reset token
@@ -425,22 +508,16 @@ exports.forgotPassword = async (req, res) => {
       user.resetPasswordToken = undefined;
       user.resetPasswordExpires = undefined;
       await user.save({ validateBeforeSave: false });
-      
+
       return res.status(500).json({
         success: false,
         message: 'Failed to send reset email. Please try again later.'
       });
     }
 
-    res.status(200).json({
-      success: true,
-      message: 'Password reset link sent to your email. Please check your inbox.'
-    });
+    res.status(200).json(genericResponse);
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController.js → forgotPassword');
   }
 };
 
@@ -466,11 +543,9 @@ exports.resetPassword = async (req, res) => {
       });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password must be at least 6 characters long'
-      });
+    const pwCheck = validatePassword(newPassword);
+    if (!pwCheck.valid) {
+      return res.status(400).json({ success: false, message: pwCheck.message });
     }
 
     // Hash reset token to find user
@@ -503,13 +578,10 @@ exports.resetPassword = async (req, res) => {
     res.status(200).json({
       success: true,
       message: 'Password has been reset successfully. You can now login with your new password.',
-      token: generateToken(user._id)
+      token: generateToken(user)
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController.js → resetPassword');
   }
 };
 
@@ -535,7 +607,7 @@ exports.sendOTP = async (req, res) => {
       });
     }
 
-    if (user.emailVerified === false) {
+    if (requireEmailVerification() && user.emailVerified === false) {
       return res.status(403).json({ success: false, message: 'Please verify your email address before using OTP login.' });
     }
 
@@ -572,11 +644,7 @@ exports.sendOTP = async (req, res) => {
       userId: user._id
     });
   } catch (error) {
-    console.error('❌ SEND-OTP ERROR:', error.message);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'authController → sendOTP', 'Could not send the OTP. Please try again.');
   }
 };
 
@@ -596,9 +664,21 @@ exports.verifyOTP = async (req, res) => {
 
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({ success: false, message: 'Account has been deactivated. Please contact support.' });
+    }
+
+    // sendOTP refuses to issue a code to a locked account, but an account can be
+    // locked after a code was issued — re-check here so a lock cannot be
+    // side-stepped with an OTP obtained moments earlier.
+    if (user.isLocked && user.lockedUntil && user.lockedUntil > Date.now()) {
+      const minutesLeft = Math.ceil((user.lockedUntil - Date.now()) / (1000 * 60));
+      return res.status(429).json({
         success: false,
-        message: 'User not found'
+        message: `Account is locked. Please try again in ${minutesLeft} minutes.`
       });
     }
 
@@ -616,21 +696,31 @@ exports.verifyOTP = async (req, res) => {
       .update(otp)
       .digest('hex');
 
-    // Verify OTP
-    if (hashedOTP !== user.otpToken) {
+    // Verify OTP — timing-safe so the comparison cannot be probed byte by byte.
+    const otpMatches = user.otpToken
+      && hashedOTP.length === user.otpToken.length
+      && crypto.timingSafeEqual(Buffer.from(hashedOTP), Buffer.from(user.otpToken));
+
+    if (!otpMatches) {
+      const MAX_OTP_ATTEMPTS = 5;
       user.otpAttempts = (user.otpAttempts || 0) + 1;
-      
-      // Lock account after 5 failed attempts
-      if (user.otpAttempts >= 5) {
+
+      if (user.otpAttempts >= MAX_OTP_ATTEMPTS) {
         user.isLocked = true;
         user.lockedUntil = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+        // Burn the code as well, so a lock cannot be waited out and the same
+        // OTP retried afterwards.
+        user.otpToken = undefined;
+        user.otpExpires = undefined;
       }
-      
+
       await user.save({ validateBeforeSave: false });
-      
+
+      // Math.max: the old expression produced "-1 attempts remaining".
+      const remaining = Math.max(0, MAX_OTP_ATTEMPTS - user.otpAttempts);
       return res.status(400).json({
         success: false,
-        message: `Invalid OTP. ${5 - user.otpAttempts} attempts remaining.`
+        message: `Invalid OTP. ${remaining} attempts remaining.`
       });
     }
 
@@ -654,13 +744,30 @@ exports.verifyOTP = async (req, res) => {
         phone: user.phone,
         role: user.role,
         address: user.address,
-        token: generateToken(user._id)
+        token: generateToken(user)
       }
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
+    return serverError(res, error, 'authController.js → verifyOTP');
+  }
+};
+
+// @desc    Log out of every device by invalidating all existing tokens
+// @route   POST /api/auth/logout
+// @access  Private
+//
+// JWTs cannot be un-issued, so "logout" for a stateless API means bumping the
+// user's tokenVersion: every token minted before this moment stops validating
+// in middleware/auth.js. The client should still discard its own copy.
+exports.logout = async (req, res) => {
+  try {
+    await User.updateOne({ _id: req.user._id }, { $inc: { tokenVersion: 1 } });
+    res.status(200).json({
+      success: true,
+      message: 'Logged out. All existing sessions for this account have been ended.'
     });
+  } catch (error) {
+    console.error('❌ LOGOUT ERROR:', error.message);
+    res.status(500).json({ success: false, message: 'Unable to log out right now. Please try again.' });
   }
 };

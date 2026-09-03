@@ -62,4 +62,9 @@ const reviewSchema = new mongoose.Schema({
 reviewSchema.index({ productId: 1, isApproved: 1 });
 reviewSchema.index({ userId: 1 });
 
+// One review per customer per product. The controller's findOne-then-create
+// check cannot enforce this on its own: two concurrent submissions both see no
+// existing review and both insert. This index is what actually guarantees it.
+reviewSchema.index({ productId: 1, userId: 1 }, { unique: true });
+
 module.exports = mongoose.model('Review', reviewSchema);

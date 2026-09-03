@@ -74,10 +74,29 @@ const userSchema = new mongoose.Schema({
   },
   lockedUntil: Date,
   lastLogin: Date,
-  lastLoginIp: String
+  lastLoginIp: String,
+
+  // Bumped whenever every existing session must be invalidated: a password
+  // change, a password reset, or an explicit "log out everywhere".
+  //
+  // JWTs are stateless, so before this a stolen token stayed valid for its full
+  // 7-day life even after the victim reset their password — the reset did
+  // nothing to lock the attacker out. The token now carries the version it was
+  // issued at and `protect` rejects any token issued before the current one.
+  tokenVersion: {
+    type: Number,
+    default: 0
+  }
 }, {
   timestamps: true
 });
+
+// ─── Indexes ─────────────────────────────────────────────────────────────────
+// email and phone already get unique indexes from their field definitions.
+// These cover the remaining real query shapes.
+userSchema.index({ role: 1, createdAt: -1 });
+userSchema.index({ resetPasswordToken: 1 });
+userSchema.index({ emailVerificationToken: 1 });
 
 // Hash password before saving
 userSchema.pre('save', async function(next) {
@@ -86,6 +105,13 @@ userSchema.pre('save', async function(next) {
   }
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
+
+  // Any password change invalidates every token issued before it. Doing this in
+  // the hook rather than at each call site means no future password-changing
+  // path can forget to revoke old sessions.
+  if (!this.isNew) {
+    this.tokenVersion = (this.tokenVersion || 0) + 1;
+  }
   next();
 });
 

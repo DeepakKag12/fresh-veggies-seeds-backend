@@ -101,4 +101,18 @@ const productSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// ─── Indexes ─────────────────────────────────────────────────────────────────
+// Every public listing filters on isActive and then sorts, so each of these
+// mirrors one real query shape. Without them Mongo collection-scans the whole
+// catalogue on every cache miss.
+productSchema.index({ isActive: 1, createdAt: -1 });               // default + "newest" sort
+productSchema.index({ isActive: 1, categoryId: 1, createdAt: -1 });// category filter
+productSchema.index({ isActive: 1, price: 1 });                    // price-low / price-high sorts
+productSchema.index({ isActive: 1, rating: -1 });                  // GET /products/featured
+// Search scans name/description/features. Without this the regex $or was a
+// full collection scan on every keystroke-driven search request.
+productSchema.index({ name: 'text', description: 'text', features: 'text' });
+productSchema.index({ isActive: 1, featured: 1, createdAt: -1 });  // homepage "most loved"
+productSchema.index({ isActive: 1, stock: 1 });                    // low-stock admin view                  // GET /products/featured
+
 module.exports = mongoose.model('Product', productSchema);

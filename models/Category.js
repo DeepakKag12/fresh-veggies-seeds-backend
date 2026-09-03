@@ -44,4 +44,7 @@ categorySchema.pre('save', function(next) {
   next();
 });
 
+// Mirrors GET /api/categories: filter on isActive, sort by name asc.
+categorySchema.index({ isActive: 1, name: 1 });
+
 module.exports = mongoose.model('Category', categorySchema);

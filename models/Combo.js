@@ -58,4 +58,7 @@ const comboSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Mirrors GET /api/combos: filter on isActive, sort by createdAt desc.
+comboSchema.index({ isActive: 1, createdAt: -1 });
+
 module.exports = mongoose.model('Combo', comboSchema);

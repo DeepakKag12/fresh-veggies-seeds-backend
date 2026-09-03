@@ -1,4 +1,7 @@
+const mongoose = require('mongoose');
 const Product = require('../models/Product');
+const statsCache = require('../utils/statsCache');
+const { serverError } = require('../utils/respond');
 
 // @desc    Get all products
 // @route   GET /api/products
@@ -16,8 +19,16 @@ exports.getProducts = async (req, res) => {
 
     const query = { isActive: true };
 
-    // Filter by category — value is a plain string (ObjectId); never an object
+    // Filter by category — value is a plain string (ObjectId); never an object.
+    // An unparseable id used to reach Mongoose and throw a CastError, which the
+    // catch below turned into a 500: anyone could trigger a server error with a
+    // crafted URL like ?category=x. A malformed id simply matches nothing.
     if (category) {
+      if (!mongoose.Types.ObjectId.isValid(category)) {
+        return res.status(200).json({
+          success: true, count: 0, total: 0, totalPages: 0, currentPage: 1, data: [],
+        });
+      }
       query.categoryId = category;
     }
 
@@ -50,13 +61,20 @@ exports.getProducts = async (req, res) => {
     else if (sort === 'newest') sortOption.createdAt = -1;
     else sortOption.createdAt = -1;
 
-    const products = await Product.find(query)
-      .populate('categoryId', 'name slug')
-      .sort(sortOption)
-      .limit(limit)
-      .skip((page - 1) * limit);
-
-    const count = await Product.countDocuments(query);
+    // Run the page query and the total count concurrently — they are
+    // independent, and serialising them doubled the latency of every miss.
+    // .lean() returns plain objects instead of hydrated Mongoose documents:
+    // these responses are only serialised to JSON, so the document wrapper was
+    // pure overhead.
+    const [products, count] = await Promise.all([
+      Product.find(query)
+        .populate('categoryId', 'name slug')
+        .sort(sortOption)
+        .limit(limit)
+        .skip((page - 1) * limit)
+        .lean(),
+      Product.countDocuments(query)
+    ]);
 
     res.status(200).json({
       success: true,
@@ -90,7 +108,8 @@ exports.getProduct = async (req, res) => {
     }
 
     const product = await Product.findById(req.params.id)
-      .populate('categoryId', 'name slug');
+      .populate('categoryId', 'name slug')
+      .lean();
 
     if (!product) {
       return res.status(404).json({
@@ -104,11 +123,7 @@ exports.getProduct = async (req, res) => {
       data: product
     });
   } catch (error) {
-    console.error('Error in getProduct:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'productController → getProduct', 'Failed to fetch product.');
   }
 };
 
@@ -119,15 +134,13 @@ exports.createProduct = async (req, res) => {
   try {
     const product = await Product.create(req.body);
 
+    statsCache.invalidate('admin:');
     res.status(201).json({
       success: true,
       data: product
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'productController.js → createProduct');
   }
 };
 
@@ -154,10 +167,7 @@ exports.updateProduct = async (req, res) => {
       data: product
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'productController.js → updateProduct');
   }
 };
 
@@ -180,10 +190,7 @@ exports.deleteProduct = async (req, res) => {
       message: 'Product deleted successfully'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'productController.js → deleteProduct');
   }
 };
 
@@ -195,7 +202,8 @@ exports.getFeaturedProducts = async (req, res) => {
     const products = await Product.find({ isActive: true })
       .sort({ rating: -1 })
       .limit(8)
-      .populate('categoryId', 'name slug');
+      .populate('categoryId', 'name slug')
+      .lean();
 
     res.status(200).json({
       success: true,
@@ -203,9 +211,6 @@ exports.getFeaturedProducts = async (req, res) => {
       data: products
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'productController.js → getFeaturedProducts');
   }
 };

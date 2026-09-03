@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const Category = require('./models/Category');
 const Product = require('./models/Product');
 const User = require('./models/User');
+const Review = require('./models/Review');
 
 dotenv.config();
 
@@ -42,6 +43,34 @@ const categories = [
     description: 'Essential gardening tools and equipment',
     image: 'https://images.unsplash.com/photo-1617576683096-00fc8eecb3af?w=400',
     icon: '🛠️'
+  },
+  {
+    name: 'Plants',
+    slug: 'plants',
+    description: 'Live indoor and outdoor plants, ready to grow',
+    image: '',
+    icon: '🪴'
+  },
+  {
+    name: 'Fertilizers',
+    slug: 'fertilizers',
+    description: 'Organic plant food and nutrients for healthy growth',
+    image: '',
+    icon: '🌾'
+  },
+  {
+    name: 'Watering Solutions',
+    slug: 'watering-solutions',
+    description: 'Watering cans, sprayers and irrigation kits',
+    image: '',
+    icon: '💧'
+  },
+  {
+    name: 'Pest Control',
+    slug: 'pest-control',
+    description: 'Safe, organic protection against garden pests',
+    image: '',
+    icon: '🐛'
   }
 ];
 
@@ -749,7 +778,8 @@ const adminUser = {
   phone: '9999999999',
   password: 'admin123',
   role: 'admin',
-  isActive: true
+  isActive: true,
+  emailVerified: true
 };
 
 // Sample Customer
@@ -759,7 +789,8 @@ const customerUser = {
   phone: '8888888888',
   password: 'customer123',
   role: 'customer',
-  isActive: true
+  isActive: true,
+  emailVerified: true
 };
 
 // Connect to Database
@@ -770,6 +801,28 @@ mongoose.connect(process.env.MONGODB_URI)
     process.exit(1);
   });
 
+
+// Reviewers. The catalogue previously carried numReviews/rating values with no
+// Review documents behind them; these give those numbers something real to
+// aggregate from, and the counts are recomputed from the documents below.
+const reviewers = [
+  { name: 'Priya Sharma',   email: 'priya.demo@freshveggies.com',  phone: '9800000101', password: 'Demo1234', emailVerified: true },
+  { name: 'Rahul Verma',    email: 'rahul.demo@freshveggies.com',  phone: '9800000102', password: 'Demo1234', emailVerified: true },
+  { name: 'Anita Desai',    email: 'anita.demo@freshveggies.com',  phone: '9800000103', password: 'Demo1234', emailVerified: true },
+  { name: 'Vikram Nair',    email: 'vikram.demo@freshveggies.com', phone: '9800000104', password: 'Demo1234', emailVerified: true },
+  { name: 'Sneha Iyer',     email: 'sneha.demo@freshveggies.com',  phone: '9800000105', password: 'Demo1234', emailVerified: true },
+  { name: 'Arjun Mehta',    email: 'arjun.demo@freshveggies.com',  phone: '9800000106', password: 'Demo1234', emailVerified: true }
+];
+
+const reviewTemplates = [
+  { rating: 5, title: 'Germinated beautifully', comment: 'Sowed these two weeks ago and nearly every seed came up. Packaging was sealed properly and arrived quickly.' },
+  { rating: 5, title: 'Exactly as described', comment: 'Good quality and the instructions on the pack were genuinely useful for a first-time gardener like me.' },
+  { rating: 4, title: 'Happy with the purchase', comment: 'Works well overall. Delivery took a day longer than estimated but the product itself is good value.' },
+  { rating: 5, title: 'Will order again', comment: 'Second time buying this. Consistent quality and the price is fair compared to my local nursery.' },
+  { rating: 4, title: 'Good, minor niggle', comment: 'Quality is solid. I would have liked a slightly larger quantity for the price, but no complaints otherwise.' },
+  { rating: 3, title: 'Average experience', comment: 'Does the job but nothing special. Some of the batch did not sprout for me.' }
+];
+
 // Seed Database
 const seedDatabase = async () => {
   try {
@@ -779,6 +832,7 @@ const seedDatabase = async () => {
     await Category.deleteMany({});
     await Product.deleteMany({});
     await User.deleteMany({});
+    await Review.deleteMany({});
     console.log('🗑️  Cleared existing data');
 
     // Create Categories
@@ -802,6 +856,20 @@ const seedDatabase = async () => {
     const products = getProducts(categoryIds);
     // Filter out products with undefined categoryId
     const validProducts = products.filter(p => p.categoryId);
+
+    // The Product model supports pack-size variants (packages[]) and the
+    // pricing service prices them, but nothing in the catalogue used the
+    // feature. Give seed products real pack sizes so the variant path is
+    // exercised end to end rather than sitting dead.
+    validProducts.forEach((p) => {
+      if (!/seeds/i.test(p.name)) return;
+      p.packages = [
+        { quantity: '50 Seeds',  price: p.price,                    stock: p.stock },
+        { quantity: '100 Seeds', price: Math.round(p.price * 1.8),  stock: Math.max(0, p.stock - 10) },
+        { quantity: '250 Seeds', price: Math.round(p.price * 4),    stock: Math.max(0, p.stock - 25) }
+      ];
+    });
+
     const createdProducts = await Product.insertMany(validProducts);
     console.log(`✅ Created ${createdProducts.length} products`);
 
@@ -809,6 +877,39 @@ const seedDatabase = async () => {
     const admin = await User.create(adminUser);
     const customer = await User.create(customerUser);
     console.log('✅ Created admin and customer users');
+
+    // Create Reviews, then recompute each product's rating and numReviews from
+    // the documents that actually exist so the two can never disagree.
+    const createdReviewers = await User.create(reviewers);
+    const reviewDocs = [];
+    createdProducts.forEach((product, pi) => {
+      // 3-5 reviews per product, each from a different reviewer so the
+      // one-review-per-user-per-product index is respected.
+      const howMany = 3 + (pi % 3);
+      for (let i = 0; i < howMany; i += 1) {
+        const t = reviewTemplates[(pi + i) % reviewTemplates.length];
+        reviewDocs.push({
+          productId: product._id,
+          userId: createdReviewers[(pi + i) % createdReviewers.length]._id,
+          rating: t.rating,
+          title: t.title,
+          comment: t.comment,
+          isVerifiedPurchase: true,
+          isApproved: true
+        });
+      }
+    });
+    const createdReviews = await Review.insertMany(reviewDocs);
+
+    await Promise.all(createdProducts.map(async (product) => {
+      const mine = createdReviews.filter(r => String(r.productId) === String(product._id));
+      const avg = mine.reduce((sum, r) => sum + r.rating, 0) / mine.length;
+      await Product.updateOne(
+        { _id: product._id },
+        { rating: Math.round(avg * 100) / 100, numReviews: mine.length }
+      );
+    }));
+    console.log(`✅ Created ${createdReviews.length} reviews across ${createdProducts.length} products`);
 
     console.log('\n📊 Seeding Summary:');
     console.log(`   Categories: ${createdCategories.length}`);

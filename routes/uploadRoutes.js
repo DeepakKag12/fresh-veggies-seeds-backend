@@ -3,6 +3,7 @@ const router = express.Router();
 const cloudinary = require('../config/cloudinary');
 const upload = require('../config/multer');
 const { protect, admin } = require('../middleware/auth');
+const { serverError } = require('../utils/respond');
 
 // @desc    Upload image to Cloudinary
 // @route   POST /api/upload
@@ -39,10 +40,7 @@ router.post('/', protect, admin, upload.single('image'), async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'uploadRoutes.js → handler');
   }
 });
 
@@ -59,10 +57,7 @@ router.delete('/:publicId', protect, admin, async (req, res) => {
       message: 'Image deleted successfully'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'uploadRoutes.js → handler');
   }
 });
 

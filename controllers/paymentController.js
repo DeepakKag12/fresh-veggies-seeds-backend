@@ -1,69 +1,27 @@
 const Order = require('../models/Order');
-const Product = require('../models/Product');
-const Combo = require('../models/Combo');
 const razorpayService = require('../services/razorpayService');
 const stockService = require('../services/stockService');
 const crypto = require('crypto');
 const { validateOrderItems, validateShippingAddress } = require('../utils/orderValidation');
 
-// ─── Constants (must match orderController.js) ────────────────────────────────
-const FREE_DELIVERY_THRESHOLD = 300;
-const DELIVERY_CHARGE = 50;
+const User          = require('../models/User');
+const couponService = require('../services/couponService');
+const { buildVerifiedItems } = require('../services/pricingService');
+const notify        = require('../services/orderNotificationService');
 
-// ─── Shared price-building helper ────────────────────────────────────────────
-async function buildVerifiedItems(orderItems) {
-  const verifiedItems = [];
-  let computedItemsPrice = 0;
+// Shared with orderController so COD and online checkouts price identically.
+const { computeShippingPrice } = require('../config/orderConfig');
+const statsCache = require('../utils/statsCache');
+const { serverError } = require('../utils/respond');
 
-  for (const item of orderItems) {
-    if (!item.product || !item.productType || !item.quantity || item.quantity < 1) {
-      throw new Error('Invalid order item structure');
-    }
-
-    let dbPrice, dbName, dbImage;
-
-    if (item.productType === 'Product') {
-      const product = await Product.findById(item.product).select('price name images isActive stock packages');
-      if (!product || !product.isActive) throw new Error(`Product not found or unavailable`);
-
-      if (item.packageId) {
-        const pkg = product.packages.id(item.packageId);
-        if (!pkg) throw new Error(`Package not found`);
-        if (pkg.stock < item.quantity) throw new Error(`Insufficient stock for "${product.name}"`);
-        dbPrice = pkg.price;
-      } else {
-        if (product.packages.length === 0 && product.stock < item.quantity)
-          throw new Error(`Insufficient stock for "${product.name}"`);
-        dbPrice = product.price;
-      }
-      dbName  = product.name;
-      dbImage = product.images?.[0] || '';
-    } else if (item.productType === 'Combo') {
-      const combo = await Combo.findById(item.product).select('price name images isActive');
-      if (!combo || !combo.isActive) throw new Error(`Combo not found or unavailable`);
-      dbPrice = combo.price;
-      dbName  = combo.name;
-      dbImage = combo.images?.[0] || '';
-    } else {
-      throw new Error(`Unknown productType: ${item.productType}`);
-    }
-
-    verifiedItems.push({
-      product: item.product, productType: item.productType,
-      name: dbName, quantity: item.quantity, price: dbPrice, image: dbImage,
-      ...(item.packageId ? { packageId: item.packageId } : {})
-    });
-    computedItemsPrice += dbPrice * item.quantity;
-  }
-  return { verifiedItems, computedItemsPrice };
-}
 
 // @desc    Create Razorpay Order (price computed on server)
 // @route   POST /api/payments/create-order
 // @access  Private
 exports.createRazorpayOrder = async (req, res) => {
   try {
-    const { orderItems, shippingAddress, discountAmount = 0, couponUsed = null } = req.body;
+    // couponCode, never a client-supplied discount — the server prices it.
+    const { orderItems, shippingAddress, couponCode = null } = req.body;
 
     if (!orderItems || orderItems.length === 0) {
       return res.status(400).json({ success: false, message: 'No order items provided' });
@@ -85,11 +43,24 @@ exports.createRazorpayOrder = async (req, res) => {
     }
 
     // ── Server-side delivery charge ───────────────────────────────────────────
-    const shippingPrice = computedItemsPrice >= FREE_DELIVERY_THRESHOLD ? 0 : DELIVERY_CHARGE;
-    const safeDiscount  = Math.min(Number(discountAmount) || 0, computedItemsPrice);
-    const computedTotal = computedItemsPrice + shippingPrice - safeDiscount;
+    const shippingPrice = computeShippingPrice(computedItemsPrice);
+
+    // ── Coupon: validated and priced on the server, then claimed ──────────────
+    let discountAmount = 0;
+    let couponUsed = null;
+    try {
+      ({ discountAmount, couponUsed } = await couponService.applyCouponToOrder(
+        couponCode, computedItemsPrice, req.user._id
+      ));
+    } catch (e) {
+      if (e.isCouponError) return res.status(400).json({ success: false, message: e.message });
+      throw e;
+    }
+
+    const computedTotal = computedItemsPrice + shippingPrice - discountAmount;
 
     if (computedTotal <= 0) {
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
       return res.status(400).json({ success: false, message: 'Computed order total must be positive' });
     }
 
@@ -98,6 +69,8 @@ exports.createRazorpayOrder = async (req, res) => {
     // Create Razorpay order using server-computed total (paise)
     const razorpayResponse = await razorpayService.createOrder(computedTotal, 'INR', receipt);
     if (!razorpayResponse.success) {
+      // Never leave a coupon use claimed against an order that was never created.
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
       return res.status(400).json({ success: false, message: razorpayResponse.message });
     }
 
@@ -111,12 +84,13 @@ exports.createRazorpayOrder = async (req, res) => {
       orderStatus:   'Pending',
       itemsPrice:    computedItemsPrice,
       shippingPrice,
-      discountAmount: safeDiscount,
-      couponUsed:    safeDiscount > 0 ? couponUsed : null,
+      discountAmount,
+      couponUsed,
       totalAmount:   computedTotal,
       paymentDetails: {
         razorpayOrderId: razorpayResponse.data.id
-      }
+      },
+      statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Awaiting online payment' }]
     });
 
     res.status(200).json({
@@ -133,13 +107,13 @@ exports.createRazorpayOrder = async (req, res) => {
         // Echo computed values back for display — not trusted on verify
         itemsPrice:    computedItemsPrice,
         shippingPrice,
-        discountAmount: safeDiscount,
+        discountAmount,
         totalAmount:   computedTotal
       }
     });
   } catch (error) {
-    console.error('createRazorpayOrder error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'paymentController → createRazorpayOrder',
+      'Could not start the payment. Please try again.');
   }
 };
 
@@ -148,6 +122,8 @@ exports.createRazorpayOrder = async (req, res) => {
 // @access  Private
 exports.verifyPayment = async (req, res) => {
   try {
+    // Revenue figures on the dashboard change here.
+    statsCache.invalidate('admin:');
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, internalOrderId } = req.body;
 
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !internalOrderId) {
@@ -188,6 +164,12 @@ exports.verifyPayment = async (req, res) => {
       transactionId:     razorpay_payment_id,
       paidAt:            new Date()
     };
+    order.statusHistory.push({
+      status:    'Confirmed',
+      from:      'Pending',
+      changedAt: new Date(),
+      note:      `Online payment captured (${razorpay_payment_id})`
+    });
     await order.save();
 
     // ── Decrement stock + send low-stock alert if needed (Online payment) ───
@@ -195,14 +177,22 @@ exports.verifyPayment = async (req, res) => {
       console.error('⚠️  Stock decrement error (verifyPayment):', err.message)
     );
 
+    // ── Confirmation to the customer + alert to the admin ────────────────────
+    // Fire-and-forget: the payment is already captured, so a mail failure must
+    // never turn a successful checkout into an error for the customer.
+    notify.sendOrderConfirmation(order, req.user).catch((e) =>
+      console.error('⚠️  Order confirmation email failed:', e.message));
+    notify.notifyAdminNewOrder(order, req.user).catch((e) =>
+      console.error('⚠️  Admin new-order alert failed:', e.message));
+
     res.status(200).json({
       success: true,
       message: 'Payment verified and order confirmed',
       data: order
     });
   } catch (error) {
-    console.error('verifyPayment error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'paymentController → verifyPayment',
+      'Could not verify the payment. If money was deducted it will be reconciled automatically — please contact support with your order number.');
   }
 };
 
@@ -211,6 +201,8 @@ exports.verifyPayment = async (req, res) => {
 // @access  Public (Razorpay servers only — verified by HMAC)
 exports.razorpayWebhook = async (req, res) => {
   try {
+    // Revenue figures on the dashboard change here.
+    statsCache.invalidate('admin:');
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
 
     // ── Verify webhook signature ──────────────────────────────────────────────
@@ -275,6 +267,21 @@ exports.razorpayWebhook = async (req, res) => {
           stockService.decrementStockAfterConfirm(order).catch((err) =>
             console.error('⚠️  Stock decrement error (webhook):', err.message)
           );
+
+          // This path is what covers a customer who paid then closed the tab
+          // before verify-payment ran — they still get their confirmation and
+          // the admin still learns about the order.
+          order.statusHistory.push({
+            status: 'Confirmed', from: 'Pending', changedAt: new Date(),
+            note: 'Confirmed via Razorpay webhook'
+          });
+          await order.save();
+
+          const customer = await User.findById(order.userId).select('name email phone');
+          notify.sendOrderConfirmation(order, customer).catch((e) =>
+            console.error('⚠️  Order confirmation email failed (webhook):', e.message));
+          notify.notifyAdminNewOrder(order, customer).catch((e) =>
+            console.error('⚠️  Admin new-order alert failed (webhook):', e.message));
         } else {
           // Already Paid by verifyPayment — still 200 so Razorpay doesn't retry
           console.log(`ℹ️  Webhook: payment.captured — order already confirmed (rzpOrderId=${rzpOrderId})`);
@@ -293,6 +300,12 @@ exports.razorpayWebhook = async (req, res) => {
           order.paymentStatus = 'Failed';
           await order.save();
           console.log(`❌ Webhook: payment.failed — order ${order._id} marked failed`);
+
+          // The coupon use was claimed when the Razorpay order was created.
+          // The payment never landed, so hand it back to the customer.
+          if (order.couponUsed?.couponId) {
+            await couponService.releaseCoupon(order.couponUsed.couponId);
+          }
         }
       }
     }
@@ -312,6 +325,19 @@ exports.razorpayWebhook = async (req, res) => {
           order.refund.refundedAt   = new Date();
           await order.save();
           console.log(`↩ Webhook: refund.processed — order ${order._id}`);
+
+          // A refund means the goods are coming back — return them to stock and
+          // free the coupon. Both are idempotent, so this is safe even when the
+          // admin cancellation path already did it.
+          await stockService.restoreStockAfterCancel(order).catch((err) =>
+            console.error('⚠️  Stock restore error (webhook):', err.message));
+          if (order.couponUsed?.couponId) {
+            await couponService.releaseCoupon(order.couponUsed.couponId);
+          }
+
+          const customer = await User.findById(order.userId).select('name email phone');
+          notify.sendRefundNotification(order, customer).catch((e) =>
+            console.error('⚠️  Refund email failed:', e.message));
         }
       }
     }
@@ -319,8 +345,9 @@ exports.razorpayWebhook = async (req, res) => {
     // Always respond 200 to acknowledge receipt
     res.status(200).json({ received: true });
   } catch (error) {
-    console.error('Webhook error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    // 500 here is deliberate: it tells Razorpay to retry delivery.
+    console.error('❌ Webhook error:', error.message, error.stack);
+    res.status(500).json({ success: false, message: 'Webhook processing failed' });
   }
 };
 
@@ -353,13 +380,23 @@ exports.handlePaymentFailure = async (req, res) => {
 
     if (order) {
       order.paymentStatus = 'Failed';
+      order.statusHistory.push({
+        status: 'Pending', from: 'Pending', changedAt: new Date(),
+        note: 'Payment dismissed or failed at checkout'
+      });
       await order.save();
       console.log(`❌ Payment dismissed/failed — order ${order._id} marked Failed`);
+
+      // Hand the coupon use back — it was claimed when the Razorpay order was
+      // created and this customer never actually paid.
+      if (order.couponUsed?.couponId) {
+        await couponService.releaseCoupon(order.couponUsed.couponId);
+      }
     }
 
     res.status(200).json({ success: true, message: 'Payment failure recorded' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'paymentController.js → handlePaymentFailure');
   }
 };
 
@@ -368,6 +405,8 @@ exports.handlePaymentFailure = async (req, res) => {
 // @access  Private/Admin
 exports.refundPayment = async (req, res) => {
   try {
+    // Revenue figures on the dashboard change here.
+    statsCache.invalidate('admin:');
     const { orderId, reason } = req.body;
 
     // ── Atomic claim: only one request can ever enter the refund path ─────────
@@ -436,7 +475,7 @@ exports.refundPayment = async (req, res) => {
       data: refundResponse.data
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'paymentController.js → refundPayment');
   }
 };
 

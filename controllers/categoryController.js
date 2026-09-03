@@ -1,4 +1,5 @@
 const Category = require('../models/Category');
+const { serverError } = require('../utils/respond');
 
 // @desc    Get all categories
 // @route   GET /api/categories
@@ -7,7 +8,8 @@ exports.getCategories = async (req, res) => {
   try {
     const categories = await Category.find({ isActive: true })
       .populate('parentCategory', 'name slug')
-      .sort({ name: 1 }); // Sort alphabetically by name
+      .sort({ name: 1 }) // Sort alphabetically by name
+      .lean();
 
     // Define desired order
     const order = ['Vegetable Seeds', 'Flower Seeds', 'Grow Bags', 'Soil & Fertilizers', 'Tools', 'Herbs'];
@@ -35,10 +37,7 @@ exports.getCategories = async (req, res) => {
       data: sortedCategories
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'categoryController.js → getCategories');
   }
 };
 
@@ -48,7 +47,8 @@ exports.getCategories = async (req, res) => {
 exports.getCategory = async (req, res) => {
   try {
     const category = await Category.findById(req.params.id)
-      .populate('parentCategory', 'name slug');
+      .populate('parentCategory', 'name slug')
+      .lean();
 
     if (!category) {
       return res.status(404).json({
@@ -62,10 +62,7 @@ exports.getCategory = async (req, res) => {
       data: category
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'categoryController.js → getCategory');
   }
 };
 
@@ -81,10 +78,7 @@ exports.createCategory = async (req, res) => {
       data: category
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'categoryController.js → createCategory');
   }
 };
 
@@ -111,10 +105,7 @@ exports.updateCategory = async (req, res) => {
       data: category
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'categoryController.js → updateCategory');
   }
 };
 
@@ -137,9 +128,6 @@ exports.deleteCategory = async (req, res) => {
       message: 'Category deleted successfully'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'categoryController.js → deleteCategory');
   }
 };

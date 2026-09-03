@@ -2,12 +2,19 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
 const Review = require('../models/Review');
+const statsCache = require('../utils/statsCache');
+const { serverError } = require('../utils/respond');
 
 // @desc    Get dashboard stats
 // @route   GET /api/admin/stats
 // @access  Private/Admin
 exports.getDashboardStats = async (req, res) => {
   try {
+    // The dashboard auto-refreshes every 30s; a 20s TTL keeps the figures
+    // effectively live while collapsing repeat loads into one set of queries.
+    const cached = statsCache.get('admin:stats');
+    if (cached) return res.status(200).json(cached);
+
     // ── Date helpers ─────────────────────────────────────────────────────────
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -77,7 +84,7 @@ exports.getDashboardStats = async (req, res) => {
 
     const g = (agg) => (agg.length > 0 ? agg[0].total : 0);
 
-    res.status(200).json({
+    const payload = {
       success: true,
       data: {
         // Counts
@@ -101,9 +108,12 @@ exports.getDashboardStats = async (req, res) => {
         monthOnlineRevenue: g(revMonthOnline),
         monthCODRevenue:    g(revMonthCOD),
       }
-    });
+    };
+
+    statsCache.set('admin:stats', payload, 20_000);
+    res.status(200).json(payload);
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'adminController.js → getDashboardStats');
   }
 };
 
@@ -112,18 +122,47 @@ exports.getDashboardStats = async (req, res) => {
 // @access  Private/Admin
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await User.find({}).sort({ createdAt: -1 });
+    const page  = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+
+    // Whitelisted projection. This previously returned whole user documents,
+    // which include the reset-password, email-verification and OTP token
+    // hashes plus the saved cart and last login IP — none of which any client
+    // needs, and all of which are useful to an attacker who gets admin access.
+    const SAFE_FIELDS = 'name email phone role isActive emailVerified createdAt lastLogin';
+
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
+    const query = {};
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      query.$or = [
+        { name:  { $regex: escaped, $options: 'i' } },
+        { email: { $regex: escaped, $options: 'i' } },
+        { phone: { $regex: escaped, $options: 'i' } }
+      ];
+    }
+
+    const [users, total] = await Promise.all([
+      User.find(query)
+        .select(SAFE_FIELDS)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      User.countDocuments(query)
+    ]);
 
     res.status(200).json({
       success: true,
       count: users.length,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
       data: users
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    console.error('getAllUsers error:', error.message);
+    res.status(500).json({ success: false, message: 'Failed to fetch users.' });
   }
 };
 
@@ -138,28 +177,41 @@ exports.updateUserRole = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid role. Must be admin or customer.' });
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { role },
-      { new: true }
-    );
-
-    if (!user) {
-      return res.status(404).json({
+    // An admin demoting themselves instantly loses access to this endpoint —
+    // and if they were the only admin, nobody can ever restore it.
+    if (req.params.id === req.user._id.toString() && role !== 'admin') {
+      return res.status(400).json({
         success: false,
-        message: 'User not found'
+        message: 'You cannot remove your own admin role. Ask another admin to do it.'
       });
     }
 
-    res.status(200).json({
-      success: true,
-      data: user
-    });
+    const target = await User.findById(req.params.id).select('role');
+    if (!target) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // Never let the store end up with zero admins.
+    if (target.role === 'admin' && role !== 'admin') {
+      const adminCount = await User.countDocuments({ role: 'admin' });
+      if (adminCount <= 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot demote the last remaining admin.'
+        });
+      }
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { role },
+      { new: true, runValidators: true }
+    ).select('name email phone role isActive');
+
+    res.status(200).json({ success: true, data: user });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    console.error('updateUserRole error:', error.message);
+    res.status(500).json({ success: false, message: 'Failed to update user role.' });
   }
 };
 
@@ -168,24 +220,45 @@ exports.updateUserRole = async (req, res) => {
 // @access  Private/Admin
 exports.deleteUser = async (req, res) => {
   try {
-    const user = await User.findByIdAndDelete(req.params.id);
+    if (req.params.id === req.user._id.toString()) {
+      return res.status(400).json({ success: false, message: 'You cannot delete your own account.' });
+    }
 
+    const user = await User.findById(req.params.id).select('role name');
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    if (user.role === 'admin') {
+      const adminCount = await User.countDocuments({ role: 'admin' });
+      if (adminCount <= 1) {
+        return res.status(400).json({ success: false, message: 'Cannot delete the last remaining admin.' });
+      }
+    }
+
+    // A customer with orders is never hard-deleted: their orders reference
+    // userId, and removing the row leaves every one of them pointing at a
+    // document that no longer exists — breaking order history, revenue reports
+    // and the admin order list. Deactivate instead, which blocks login while
+    // keeping the financial record intact.
+    const orderCount = await Order.countDocuments({ userId: user._id });
+    if (orderCount > 0) {
+      await User.updateOne(
+        { _id: user._id },
+        { $set: { isActive: false }, $inc: { tokenVersion: 1 } }  // also ends their sessions
+      );
+      return res.status(200).json({
+        success: true,
+        message: `${user.name} has ${orderCount} order(s), so the account was deactivated rather than deleted to preserve order history.`,
+        data: { deactivated: true, orderCount }
       });
     }
 
-    res.status(200).json({
-      success: true,
-      message: 'User deleted successfully'
-    });
+    await User.findByIdAndDelete(user._id);
+    res.status(200).json({ success: true, message: 'User deleted successfully', data: { deactivated: false } });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    console.error('deleteUser error:', error.message);
+    res.status(500).json({ success: false, message: 'Failed to delete user.' });
   }
 };
 
@@ -350,10 +423,7 @@ exports.getSalesAnalytics = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'adminController.js → getSalesAnalytics');
   }
 };
 
@@ -377,9 +447,6 @@ exports.getLowStockProducts = async (req, res) => {
       data: products
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'adminController.js → getLowStockProducts');
   }
 };

@@ -1,4 +1,5 @@
 const Combo = require('../models/Combo');
+const { serverError } = require('../utils/respond');
 
 // @desc    Get all combos
 // @route   GET /api/combos
@@ -7,7 +8,8 @@ exports.getCombos = async (req, res) => {
   try {
     const combos = await Combo.find({ isActive: true })
       .populate('includedProducts.productId', 'name price images')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     res.status(200).json({
       success: true,
@@ -15,10 +17,7 @@ exports.getCombos = async (req, res) => {
       data: combos
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'comboController.js → getCombos');
   }
 };
 
@@ -28,7 +27,8 @@ exports.getCombos = async (req, res) => {
 exports.getCombo = async (req, res) => {
   try {
     const combo = await Combo.findById(req.params.id)
-      .populate('includedProducts.productId', 'name price images description');
+      .populate('includedProducts.productId', 'name price images description')
+      .lean();
 
     if (!combo) {
       return res.status(404).json({
@@ -42,10 +42,7 @@ exports.getCombo = async (req, res) => {
       data: combo
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'comboController.js → getCombo');
   }
 };
 
@@ -61,10 +58,7 @@ exports.createCombo = async (req, res) => {
       data: combo
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'comboController.js → createCombo');
   }
 };
 
@@ -91,10 +85,7 @@ exports.updateCombo = async (req, res) => {
       data: combo
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'comboController.js → updateCombo');
   }
 };
 
@@ -117,9 +108,6 @@ exports.deleteCombo = async (req, res) => {
       message: 'Combo deleted successfully'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'comboController.js → deleteCombo');
   }
 };

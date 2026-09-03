@@ -3,7 +3,8 @@ const router = express.Router();
 const { 
   register, 
   login, 
-  getMe, 
+  getMe,
+  logout, 
   updateProfile, 
   changeEmail, 
   changePassword,
@@ -31,6 +32,7 @@ router.post('/send-otp', sendOTP);
 router.post('/verify-otp', verifyOTP);
 
 // Protected routes
+router.post('/logout', protect, logout);
 router.get('/me', protect, getMe);
 router.get('/cart', protect, getCart);
 router.put('/cart', protect, updateCart);

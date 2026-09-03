@@ -1,96 +1,34 @@
 const Order = require('../models/Order');
-const Product = require('../models/Product');
-const Combo = require('../models/Combo');
+const User = require('../models/User');
 const dtdcService = require('../services/dtdcService');
 const razorpayService = require('../services/razorpayService');
 const stockService = require('../services/stockService');
 const { validateOrderItems, validateShippingAddress } = require('../utils/orderValidation');
+const couponService = require('../services/couponService');
+const { buildVerifiedItems } = require('../services/pricingService');
+const notify        = require('../services/orderNotificationService');
+const statsCache = require('../utils/statsCache');
+const { serverError } = require('../utils/respond');
 
-// ─── Delivery charge constants ───────────────────────────────────────────────
-const FREE_DELIVERY_THRESHOLD = 300; // ₹
-const DELIVERY_CHARGE = 50;          // ₹
-
-// ─── Allowed order-status state machine ──────────────────────────────────────
-// Only these forward/backward transitions are permitted for admin status updates
-const ALLOWED_TRANSITIONS = {
-  Pending:               ['Confirmed', 'Cancelled'],
-  Confirmed:             ['Packed', 'Cancelled'],
-  Packed:                ['Shipped', 'Cancelled'],
-  Shipped:               ['Delivered'],
-  Delivered:             [],            // terminal
-  Cancelled:             [],            // terminal
-  CancellationRequested: ['Confirmed', 'Packed', 'Shipped'], // admin reject restores
-};
+// Pricing rules and the status state machine are shared with paymentController
+// so COD and online checkouts can never price or transition differently.
+const {
+  computeShippingPrice,
+  ALLOWED_TRANSITIONS,
+  SHIPPABLE_STATUSES,
+} = require('../config/orderConfig');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Fetch verified prices for each cart item directly from the database.
- * Returns { items, computedItemsPrice } or throws on bad input.
- */
-async function buildVerifiedItems(orderItems) {
-  const verifiedItems = [];
-  let computedItemsPrice = 0;
-
-  for (const item of orderItems) {
-    if (!item.product || !item.productType || !item.quantity || item.quantity < 1) {
-      throw new Error('Invalid order item structure');
-    }
-
-    let dbPrice;
-    let dbName;
-    let dbImage;
-
-    if (item.productType === 'Product') {
-      const product = await Product.findById(item.product).select('price name images isActive stock packages');
-      if (!product || !product.isActive) throw new Error(`Product "${item.product}" not found or unavailable`);
-      if (product.stock !== undefined && product.packages.length === 0 && product.stock < item.quantity) {
-        throw new Error(`Insufficient stock for "${product.name}"`);
-      }
-
-      // If the item has a packageId, look up the package price
-      if (item.packageId) {
-        const pkg = product.packages.id(item.packageId);
-        if (!pkg) throw new Error(`Package not found for "${product.name}"`);
-        if (pkg.stock < item.quantity) throw new Error(`Insufficient package stock for "${product.name}"`);
-        dbPrice = pkg.price;
-      } else {
-        dbPrice = product.price;
-      }
-
-      dbName  = product.name;
-      dbImage = product.images?.[0] || '';
-    } else if (item.productType === 'Combo') {
-      const combo = await Combo.findById(item.product).select('price name images isActive');
-      if (!combo || !combo.isActive) throw new Error(`Combo "${item.product}" not found or unavailable`);
-      dbPrice = combo.price;
-      dbName  = combo.name;
-      dbImage = combo.images?.[0] || '';
-    } else {
-      throw new Error(`Unknown productType: ${item.productType}`);
-    }
-
-    verifiedItems.push({
-      product:     item.product,
-      productType: item.productType,
-      name:        dbName,
-      quantity:    item.quantity,
-      price:       dbPrice, // always server-sourced price
-      image:       dbImage,
-      ...(item.packageId ? { packageId: item.packageId } : {})
-    });
-    computedItemsPrice += dbPrice * item.quantity;
-  }
-
-  return { verifiedItems, computedItemsPrice };
-}
 
 // @desc    Create new COD order (server-side price validation)
 // @route   POST /api/orders
 // @access  Private
 exports.createOrder = async (req, res) => {
   try {
-    const { orderItems, shippingAddress, paymentMode, discountAmount = 0, couponUsed = null } = req.body;
+    // NOTE: couponCode, never a discount amount. The discount is computed
+    // server-side from the code — see couponService.
+    const { orderItems, shippingAddress, paymentMode, couponCode = null } = req.body;
 
     if (!orderItems || orderItems.length === 0) {
       return res.status(400).json({ success: false, message: 'No order items provided' });
@@ -115,33 +53,78 @@ exports.createOrder = async (req, res) => {
     try {
       ({ verifiedItems, computedItemsPrice } = await buildVerifiedItems(orderItems));
     } catch (e) {
-      return res.status(400).json({ success: false, message: e.message });
+      // Availability problems are a conflict with current stock (409), not a
+      // malformed request (400) — the client sent something perfectly valid.
+      const outOfStock = /sold out|left of/i.test(e.message);
+      return res.status(outOfStock ? 409 : 400).json({ success: false, message: e.message });
     }
 
     // ── Server-side delivery charge ───────────────────────────────────────────
-    const shippingPrice = computedItemsPrice >= FREE_DELIVERY_THRESHOLD ? 0 : DELIVERY_CHARGE;
+    const shippingPrice = computeShippingPrice(computedItemsPrice);
 
-    // ── Apply discount (sanity-capped — cannot exceed items price) ────────────
-    const safeDiscount = Math.min(Number(discountAmount) || 0, computedItemsPrice);
-    const computedTotal = computedItemsPrice + shippingPrice - safeDiscount;
+    // ── Coupon: validated and priced on the server, then claimed ──────────────
+    let discountAmount = 0;
+    let couponUsed = null;
+    try {
+      ({ discountAmount, couponUsed } = await couponService.applyCouponToOrder(
+        couponCode, computedItemsPrice, req.user._id
+      ));
+    } catch (e) {
+      if (e.isCouponError) return res.status(400).json({ success: false, message: e.message });
+      throw e;
+    }
 
-    const order = await Order.create({
-      userId: req.user._id,
-      orderItems: verifiedItems,
-      shippingAddress,
-      paymentMode: paymentMode || 'COD',
-      paymentStatus: 'Pending',
-      orderStatus: 'Pending',
-      itemsPrice: computedItemsPrice,
-      shippingPrice,
-      discountAmount: safeDiscount,
-      couponUsed: safeDiscount > 0 ? couponUsed : null,
-      totalAmount: computedTotal
-    });
+    const computedTotal = computedItemsPrice + shippingPrice - discountAmount;
+
+    // ── Reserve stock atomically, before the order exists ─────────────────────
+    // buildVerifiedItems only *checks* availability. Two customers racing for
+    // the last unit both passed that check and both got an order. Claiming the
+    // units here means the database picks exactly one winner and the other is
+    // told it is sold out straight away, instead of finding out at confirmation.
+    try {
+      await stockService.reserveStock(verifiedItems);
+    } catch (e) {
+      // Give back anything the coupon claim already took.
+      if (couponUsed?.couponId) {
+        await couponService.releaseCoupon(couponUsed.couponId).catch(() => {});
+      }
+      return res.status(e.statusCode || 409).json({ success: false, message: e.message });
+    }
+
+    let order;
+    try {
+      order = await Order.create({
+        userId: req.user._id,
+        orderItems: verifiedItems,
+        shippingAddress,
+        paymentMode: paymentMode || 'COD',
+        paymentStatus: 'Pending',
+        orderStatus: 'Pending',
+        itemsPrice: computedItemsPrice,
+        shippingPrice,
+        discountAmount,
+        couponUsed,
+        totalAmount: computedTotal,
+        // Units were claimed above, so confirmation must not take them twice.
+        stockDecremented: true,
+        statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Order placed' }]
+      });
+    } catch (createErr) {
+      // The coupon use was claimed before the order existed — hand it back so a
+      // failed insert does not silently burn one of the customer's allowance.
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
+      throw createErr;
+    }
+
+    // ── Notify (fire-and-forget: a mail outage must not fail a placed order) ──
+    notify.sendOrderConfirmation(order, req.user).catch((e) =>
+      console.error('⚠️  Order confirmation email failed:', e.message));
+    notify.notifyAdminNewOrder(order, req.user).catch((e) =>
+      console.error('⚠️  Admin new-order alert failed:', e.message));
 
     res.status(201).json({ success: true, data: order });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'orderController.js → createOrder');
   }
 };
 
@@ -152,24 +135,38 @@ exports.getMyOrders = async (req, res) => {
   try {
     // Same real-order filter as getAllOrders:
     // COD orders are always real; Online orders only shown if payment succeeded/refunded
-    const orders = await Order.find({
+    const page  = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+
+    const filter = {
       userId: req.user._id,
       $or: [
         { paymentMode: 'COD' },
         { paymentStatus: { $in: ['Paid', 'Refunded'] } }
       ]
-    }).sort({ createdAt: -1 });
+    };
+
+    // Paginated: a long-standing customer previously got every order they had
+    // ever placed in one unbounded response.
+    const [orders, total] = await Promise.all([
+      Order.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Order.countDocuments(filter)
+    ]);
 
     res.status(200).json({
       success: true,
       count: orders.length,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
       data: orders
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'orderController.js → getMyOrders');
   }
 };
 
@@ -201,10 +198,7 @@ exports.getOrder = async (req, res) => {
       data: order
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'orderController.js → getOrder');
   }
 };
 
@@ -248,7 +242,7 @@ exports.getAllOrders = async (req, res) => {
       data: orders
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'orderController.js → getAllOrders');
   }
 };
 
@@ -270,13 +264,25 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
+    const previousStatus = order.orderStatus;
     order.orderStatus = orderStatus;
+
+    // Append-only audit trail — who moved this order, when, and from what.
+    order.statusHistory.push({
+      status:    orderStatus,
+      from:      previousStatus,
+      changedAt: new Date(),
+      changedBy: req.user._id,
+      note:      req.body.note || undefined
+    });
 
     if (orderStatus === 'Delivered') {
       order.deliveredAt = Date.now();
-      // COD: mark paid on delivery
+      // COD: the money changes hands on delivery, so that is when it is paid.
       if (order.paymentMode === 'COD') order.paymentStatus = 'Paid';
     }
+
+    statsCache.invalidate('admin:');
 
     if (orderStatus === 'Cancelled') {
       order.cancelledAt = Date.now();
@@ -284,16 +290,36 @@ exports.updateOrderStatus = async (req, res) => {
 
     await order.save();
 
-    // ── Decrement stock when order is confirmed (handles COD flow) ─────────
+    // ── Inventory ─────────────────────────────────────────────────────────────
     if (orderStatus === 'Confirmed') {
       stockService.decrementStockAfterConfirm(order).catch((err) =>
         console.error('⚠️  Stock decrement error:', err.message)
       );
     }
 
+    if (orderStatus === 'Cancelled') {
+      // Put the units back. Without this every cancellation permanently lost
+      // the stock it had taken on confirmation.
+      stockService.restoreStockAfterCancel(order).catch((err) =>
+        console.error('⚠️  Stock restore error:', err.message)
+      );
+      // A cancelled order must not keep consuming the customer's coupon allowance.
+      if (order.couponUsed?.couponId) {
+        couponService.releaseCoupon(order.couponUsed.couponId).catch((err) =>
+          console.error('⚠️  Coupon release error:', err.message)
+        );
+      }
+    }
+
+    // ── Tell the customer ─────────────────────────────────────────────────────
+    const customer = await User.findById(order.userId).select('name email phone');
+    notify.sendStatusUpdate(order, customer, orderStatus).catch((err) =>
+      console.error('⚠️  Status update email failed:', err.message)
+    );
+
     res.status(200).json({ success: true, data: order });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'orderController.js → updateOrderStatus');
   }
 };
 
@@ -329,6 +355,13 @@ exports.cancelOrder = async (req, res) => {
       previousStatus: order.orderStatus
     };
     order.orderStatus = 'CancellationRequested';
+    order.statusHistory.push({
+      status:    'CancellationRequested',
+      from:      order.cancellationRequest.previousStatus,
+      changedAt: new Date(),
+      changedBy: req.user._id,
+      note:      order.cancellationRequest.reason
+    });
 
     await order.save();
 
@@ -338,7 +371,7 @@ exports.cancelOrder = async (req, res) => {
       message: 'Cancellation request submitted. Admin will review and process it shortly.'
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'orderController.js → cancelOrder');
   }
 };
 
@@ -419,7 +452,36 @@ exports.approveCancellation = async (req, res) => {
       await Order.updateOne({ _id: order._id }, { $unset: { refund: '' } });
     }
 
+    // ── Release everything the order was holding ──────────────────────────────
+    // Stock first: it was taken on confirmation and must go back regardless of
+    // whether this order was paid online or COD.
+    await stockService.restoreStockAfterCancel(order).catch((err) =>
+      console.error('⚠️  Stock restore error:', err.message)
+    );
+    if (order.couponUsed?.couponId) {
+      await couponService.releaseCoupon(order.couponUsed.couponId);
+    }
+
     const finalOrder = await Order.findById(order._id);
+
+    // Record the cancellation in the audit trail.
+    finalOrder.statusHistory.push({
+      status:    'Cancelled',
+      from:      'CancellationRequested',
+      changedAt: new Date(),
+      changedBy: req.user._id,
+      note:      `Cancellation approved. ${order.cancellationRequest?.reason || ''}`.trim()
+    });
+    await finalOrder.save();
+
+    const customer = await User.findById(finalOrder.userId).select('name email phone');
+    notify.sendStatusUpdate(finalOrder, customer, 'Cancelled').catch((err) =>
+      console.error('⚠️  Cancellation email failed:', err.message));
+    if (finalOrder.refund?.refundStatus === 'Processed') {
+      notify.sendRefundNotification(finalOrder, customer).catch((err) =>
+        console.error('⚠️  Refund email failed:', err.message));
+    }
+
     const refundMsg  = finalOrder.refund?.refundStatus === 'Processed'
       ? ` Refund of ₹${order.totalAmount} initiated — credits in 5-7 business days.`
       : '';
@@ -430,7 +492,7 @@ exports.approveCancellation = async (req, res) => {
       message: `Cancellation approved.${refundMsg}`
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'orderController.js → approveCancellation');
   }
 };
 
@@ -456,6 +518,13 @@ exports.rejectCancellation = async (req, res) => {
     order.cancellationRequest.rejectedAt = new Date();
     order.cancellationRequest.rejectionReason = rejectionReason || 'Cancellation request rejected by admin.';
     order.orderStatus = previousStatus;
+    order.statusHistory.push({
+      status:    previousStatus,
+      from:      'CancellationRequested',
+      changedAt: new Date(),
+      changedBy: req.user._id,
+      note:      order.cancellationRequest.rejectionReason
+    });
 
     await order.save();
 
@@ -465,7 +534,7 @@ exports.rejectCancellation = async (req, res) => {
       message: `Cancellation request rejected. Order restored to "${previousStatus}".`
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    return serverError(res, error, 'orderController.js → rejectCancellation');
   }
 };
 
@@ -491,6 +560,24 @@ exports.createShipment = async (req, res) => {
       });
     }
 
+    // Respect the order state machine. This previously wrote orderStatus =
+    // 'Shipped' unconditionally, so an unpaid, pending or already-cancelled
+    // order could be handed to the courier.
+    if (!SHIPPABLE_STATUSES.includes(order.orderStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot ship an order with status "${order.orderStatus}". It must be one of: ${SHIPPABLE_STATUSES.join(', ')}.`
+      });
+    }
+
+    // Online orders must actually be paid before they leave the warehouse.
+    if (order.paymentMode !== 'COD' && order.paymentStatus !== 'Paid') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot ship an online order that has not been paid.'
+      });
+    }
+
     // Create DTDC shipment
     const shipmentResult = await dtdcService.createShipment(order);
 
@@ -510,9 +597,22 @@ exports.createShipment = async (req, res) => {
       shippedAt: new Date(),
       estimatedDelivery: shipmentResult.estimatedDelivery
     };
+    const previousStatus = order.orderStatus;
     order.orderStatus = 'Shipped';
+    order.statusHistory.push({
+      status:    'Shipped',
+      from:      previousStatus,
+      changedAt: new Date(),
+      changedBy: req.user._id,
+      note:      `Shipment booked — ${shipmentResult.courierName || 'DTDC'} AWB ${shipmentResult.awbNumber}`
+    });
 
     await order.save();
+
+    // Send the customer their tracking number.
+    const customer = await User.findById(order.userId).select('name email phone');
+    notify.sendStatusUpdate(order, customer, 'Shipped').catch((err) =>
+      console.error('⚠️  Shipment email failed:', err.message));
 
     res.status(200).json({
       success: true,
@@ -520,10 +620,7 @@ exports.createShipment = async (req, res) => {
       data: order
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'orderController.js → createShipment');
   }
 };
 
@@ -571,10 +668,7 @@ exports.trackOrder = async (req, res) => {
       order: order
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'orderController.js → trackOrder');
   }
 };
 
@@ -592,9 +686,6 @@ exports.checkPincodeServiceability = async (req, res) => {
       data: result
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'orderController.js → checkPincodeServiceability');
   }
 };

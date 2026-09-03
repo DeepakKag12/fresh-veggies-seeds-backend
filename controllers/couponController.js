@@ -1,5 +1,6 @@
 const Coupon = require('../models/Coupon');
-const Order = require('../models/Order');
+const couponService = require('../services/couponService');
+const { serverError } = require('../utils/respond');
 
 // @desc    Get all coupons
 // @route   GET /api/coupons
@@ -17,10 +18,7 @@ exports.getAllCoupons = async (req, res) => {
       data: coupons
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'couponController.js → getAllCoupons');
   }
 };
 
@@ -42,10 +40,7 @@ exports.getActiveCoupons = async (req, res) => {
       data: coupons
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'couponController.js → getActiveCoupons');
   }
 };
 
@@ -54,86 +49,27 @@ exports.getActiveCoupons = async (req, res) => {
 // @access   Private
 exports.validateCoupon = async (req, res) => {
   try {
-    const { code, orderAmount, products } = req.body;
-    const userId = req.user._id;
+    const { code, orderAmount } = req.body;
 
-    const coupon = await Coupon.findOne({ 
-      code: code.toUpperCase(),
-      isActive: true
-    });
+    // Delegates to couponService so this preview and the discount actually
+    // applied at checkout can never disagree — they run the same code.
+    const result = await couponService.validateCoupon(code, Number(orderAmount) || 0, req.user._id);
 
-    if (!coupon) {
-      return res.status(404).json({
-        success: false,
-        message: 'Invalid coupon code'
-      });
+    if (!result.valid) {
+      return res.status(400).json({ success: false, message: result.message });
     }
-
-    // Check if coupon is expired
-    const now = new Date();
-    if (now < coupon.startDate || now > coupon.expiryDate) {
-      return res.status(400).json({
-        success: false,
-        message: 'Coupon has expired'
-      });
-    }
-
-    // Check minimum order amount
-    if (orderAmount < coupon.minOrderAmount) {
-      return res.status(400).json({
-        success: false,
-        message: `Minimum order amount of ₹${coupon.minOrderAmount} required`
-      });
-    }
-
-    // Check usage limit
-    if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
-      return res.status(400).json({
-        success: false,
-        message: 'Coupon usage limit reached'
-      });
-    }
-
-    // Check per user limit
-    const userUsageCount = await Order.countDocuments({
-      userId,
-      'couponUsed.code': code.toUpperCase()
-    });
-
-    if (userUsageCount >= coupon.perUserLimit) {
-      return res.status(400).json({
-        success: false,
-        message: 'You have already used this coupon'
-      });
-    }
-
-    // Calculate discount
-    let discountAmount = 0;
-    if (coupon.discountType === 'percentage') {
-      discountAmount = (orderAmount * coupon.discountValue) / 100;
-      if (coupon.maxDiscountAmount) {
-        discountAmount = Math.min(discountAmount, coupon.maxDiscountAmount);
-      }
-    } else {
-      discountAmount = coupon.discountValue;
-    }
-
-    discountAmount = Math.round(discountAmount);
 
     res.status(200).json({
       success: true,
       data: {
-        couponId: coupon._id,
-        code: coupon.code,
-        discountAmount,
-        finalAmount: orderAmount - discountAmount
+        couponId:       result.coupon._id,
+        code:           result.coupon.code,
+        discountAmount: result.discountAmount,
+        finalAmount:    (Number(orderAmount) || 0) - result.discountAmount
       }
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'couponController.js → validateCoupon');
   }
 };
 
@@ -149,10 +85,7 @@ exports.createCoupon = async (req, res) => {
       data: coupon
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'couponController.js → createCoupon');
   }
 };
 
@@ -179,10 +112,7 @@ exports.updateCoupon = async (req, res) => {
       data: coupon
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'couponController.js → updateCoupon');
   }
 };
 
@@ -205,9 +135,6 @@ exports.deleteCoupon = async (req, res) => {
       message: 'Coupon deleted successfully'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'couponController.js → deleteCoupon');
   }
 };

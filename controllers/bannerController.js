@@ -1,4 +1,5 @@
 const Banner = require('../models/Banner');
+const { serverError } = require('../utils/respond');
 
 // @desc    Get all banners (Admin)
 // @route   GET /api/banners/admin
@@ -13,10 +14,7 @@ exports.getAllBanners = async (req, res) => {
       data: banners
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'bannerController.js → getAllBanners');
   }
 };
 
@@ -41,7 +39,7 @@ exports.getActiveBanners = async (req, res) => {
       query.position = position;
     }
 
-    const banners = await Banner.find(query).sort({ order: 1 });
+    const banners = await Banner.find(query).sort({ order: 1 }).lean();
 
     // Increment view count
     await Banner.updateMany(
@@ -55,10 +53,7 @@ exports.getActiveBanners = async (req, res) => {
       data: banners
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'bannerController.js → getActiveBanners');
   }
 };
 
@@ -77,10 +72,7 @@ exports.trackBannerClick = async (req, res) => {
       message: 'Click tracked'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'bannerController.js → trackBannerClick');
   }
 };
 
@@ -96,10 +88,7 @@ exports.createBanner = async (req, res) => {
       data: banner
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'bannerController.js → createBanner');
   }
 };
 
@@ -126,10 +115,7 @@ exports.updateBanner = async (req, res) => {
       data: banner
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'bannerController.js → updateBanner');
   }
 };
 
@@ -152,9 +138,6 @@ exports.deleteBanner = async (req, res) => {
       message: 'Banner deleted successfully'
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    return serverError(res, error, 'bannerController.js → deleteBanner');
   }
 };

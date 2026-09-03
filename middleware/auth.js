@@ -32,6 +32,17 @@ exports.protect = async (req, res, next) => {
       return res.status(403).json({ success: false, message: 'Account has been deactivated. Contact support.' });
     }
 
+    // Reject tokens issued before the last password change / "log out
+    // everywhere". Tokens minted before tokenVersion existed carry no `tv`
+    // claim; treating a missing claim as 0 keeps them working for accounts that
+    // have never changed a password, and revokes them the moment one does.
+    if ((decoded.tv ?? 0) !== (user.tokenVersion || 0)) {
+      return res.status(401).json({
+        success: false,
+        message: 'Session is no longer valid — please login again.'
+      });
+    }
+
     req.user = user;
     next();
   } catch (error) {

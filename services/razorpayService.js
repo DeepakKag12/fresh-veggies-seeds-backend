@@ -1,11 +1,32 @@
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 
-// Initialize Razorpay instance
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET
-});
+// Razorpay is constructed lazily.
+//
+// The client throws at construction when no key is configured. Building it at
+// module load meant an empty RAZORPAY_KEY_ID crashed the entire server on
+// startup — auth, catalogue and COD orders included — because this module is
+// required transitively by orderController. A missing payment key should
+// disable online payments, not the whole application.
+let razorpayClient = null;
+
+const isConfigured = () =>
+  Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+
+const getClient = () => {
+  if (!isConfigured()) {
+    throw new Error('Online payments are not configured on this server.');
+  }
+  if (!razorpayClient) {
+    razorpayClient = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  }
+  return razorpayClient;
+};
+
+exports.isConfigured = isConfigured;
 
 // Create Razorpay Order
 exports.createOrder = async (amount, currency = 'INR', receipt) => {
@@ -19,7 +40,7 @@ exports.createOrder = async (amount, currency = 'INR', receipt) => {
 
     console.log('🎯 Razorpay Service - Creating order with options:', options);
 
-    const order = await razorpay.orders.create(options);
+    const order = await getClient().orders.create(options);
     
     console.log('✅ Razorpay Service - Order created:', order.id);
 
@@ -69,7 +90,7 @@ exports.verifyPaymentSignature = (razorpay_order_id, razorpay_payment_id, razorp
 // Fetch Payment Details
 exports.fetchPaymentDetails = async (payment_id) => {
   try {
-    const payment = await razorpay.payments.fetch(payment_id);
+    const payment = await getClient().payments.fetch(payment_id);
     return {
       success: true,
       data: payment
@@ -85,7 +106,7 @@ exports.fetchPaymentDetails = async (payment_id) => {
 // Refund Payment
 exports.refundPayment = async (payment_id, amount) => {
   try {
-    const refund = await razorpay.payments.refund(payment_id, {
+    const refund = await getClient().payments.refund(payment_id, {
       amount: Math.round(amount * 100) // Convert to paise
     });
     return {
