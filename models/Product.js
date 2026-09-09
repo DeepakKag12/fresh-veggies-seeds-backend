@@ -101,6 +101,21 @@ const productSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Auto-sync total stock from package variants if present
+productSchema.pre('validate', function (next) {
+  if (this.packages && this.packages.length > 0) {
+    this.stock = this.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
+  }
+  next();
+});
+
+productSchema.pre('save', function (next) {
+  if (this.packages && this.packages.length > 0) {
+    this.stock = this.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
+  }
+  next();
+});
+
 // ─── Indexes ─────────────────────────────────────────────────────────────────
 // Every public listing filters on isActive and then sorts, so each of these
 // mirrors one real query shape. Without them Mongo collection-scans the whole

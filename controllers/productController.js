@@ -3,6 +3,16 @@ const Product = require('../models/Product');
 const statsCache = require('../utils/statsCache');
 const { serverError } = require('../utils/respond');
 
+// Helper to ensure returned product stock reflects package variants when present
+const enrichProductStock = (product) => {
+  if (!product) return product;
+  if (Array.isArray(product.packages) && product.packages.length > 0) {
+    const pkgStock = product.packages.reduce((sum, pkg) => sum + (Number(pkg.stock) || 0), 0);
+    return { ...product, stock: pkgStock };
+  }
+  return product;
+};
+
 // @desc    Get all products
 // @route   GET /api/products
 // @access  Public
@@ -82,7 +92,7 @@ exports.getProducts = async (req, res) => {
       total: count,
       totalPages: Math.ceil(count / limit),
       currentPage: page,
-      data: products
+      data: products.map(enrichProductStock)
     });
   } catch (error) {
     console.error('❌ getProducts error:', error.message, error.stack);
@@ -120,7 +130,7 @@ exports.getProduct = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: product
+      data: enrichProductStock(product)
     });
   } catch (error) {
     return serverError(res, error, 'productController → getProduct', 'Failed to fetch product.');
@@ -132,6 +142,9 @@ exports.getProduct = async (req, res) => {
 // @access  Private/Admin
 exports.createProduct = async (req, res) => {
   try {
+    if (req.body.packages && Array.isArray(req.body.packages) && req.body.packages.length > 0) {
+      req.body.stock = req.body.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
+    }
     const product = await Product.create(req.body);
 
     statsCache.invalidate('admin:');
@@ -149,6 +162,9 @@ exports.createProduct = async (req, res) => {
 // @access  Private/Admin
 exports.updateProduct = async (req, res) => {
   try {
+    if (req.body.packages && Array.isArray(req.body.packages) && req.body.packages.length > 0) {
+      req.body.stock = req.body.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
+    }
     const product = await Product.findByIdAndUpdate(
       req.params.id,
       req.body,
@@ -208,7 +224,7 @@ exports.getFeaturedProducts = async (req, res) => {
     res.status(200).json({
       success: true,
       count: products.length,
-      data: products
+      data: products.map(enrichProductStock)
     });
   } catch (error) {
     return serverError(res, error, 'productController.js → getFeaturedProducts');

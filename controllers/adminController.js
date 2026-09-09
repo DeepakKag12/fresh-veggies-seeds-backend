@@ -435,16 +435,26 @@ exports.getLowStockProducts = async (req, res) => {
     const threshold = parseInt(req.query.threshold) || 10;
     
     const products = await Product.find({
-      stock: { $lt: threshold },
       isActive: true
     })
       .populate('categoryId', 'name')
-      .sort({ stock: 1 });
+      .lean();
+
+    const lowStock = products
+      .map((p) => {
+        if (Array.isArray(p.packages) && p.packages.length > 0) {
+          const totalStock = p.packages.reduce((sum, pkg) => sum + (Number(pkg.stock) || 0), 0);
+          return { ...p, stock: totalStock };
+        }
+        return p;
+      })
+      .filter((p) => (p.stock ?? 0) < threshold)
+      .sort((a, b) => (a.stock ?? 0) - (b.stock ?? 0));
 
     res.status(200).json({
       success: true,
-      count: products.length,
-      data: products
+      count: lowStock.length,
+      data: lowStock
     });
   } catch (error) {
     return serverError(res, error, 'adminController.js → getLowStockProducts');

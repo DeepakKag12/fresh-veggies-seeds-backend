@@ -47,7 +47,7 @@ exports.reserveStock = async (items) => {
       if (t.packageId) {
         await Product.updateOne(
           { _id: t.product, 'packages._id': t.packageId },
-          { $inc: { 'packages.$.stock': t.quantity } }
+          { $inc: { 'packages.$.stock': t.quantity, stock: t.quantity } }
         ).catch((e) => console.error('⚠️  Reservation rollback failed:', e.message));
       } else if (t.productType === 'Combo') {
         await Combo.updateOne({ _id: t.product }, { $inc: { stock: t.quantity } })
@@ -67,7 +67,7 @@ exports.reserveStock = async (items) => {
       // Pack variants carry their own stock inside the packages subdocument.
       claimed = await Product.findOneAndUpdate(
         { _id: item.product, packages: { $elemMatch: { _id: item.packageId, stock: { $gte: qty } } } },
-        { $inc: { 'packages.$.stock': -qty } },
+        { $inc: { 'packages.$.stock': -qty, stock: -qty } },
         { new: true, select: 'name' }
       );
     } else if (item.productType === 'Combo') {
@@ -227,11 +227,20 @@ exports.restoreStockAfterCancel = async (order) => {
     if (item.productType !== 'Product') continue;
 
     try {
-      const updated = await Product.findByIdAndUpdate(
-        item.product,
-        { $inc: { stock: item.quantity } },
-        { new: true, select: 'name stock' }
-      );
+      let updated;
+      if (item.packageId) {
+        updated = await Product.findOneAndUpdate(
+          { _id: item.product, 'packages._id': item.packageId },
+          { $inc: { 'packages.$.stock': item.quantity, stock: item.quantity } },
+          { new: true, select: 'name stock' }
+        );
+      } else {
+        updated = await Product.findByIdAndUpdate(
+          item.product,
+          { $inc: { stock: item.quantity } },
+          { new: true, select: 'name stock' }
+        );
+      }
       if (!updated) {
         console.error(`⚠️  Stock restore: product ${item.product} no longer exists`);
         continue;

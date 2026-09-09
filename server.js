@@ -168,6 +168,24 @@ const connectDB = async () => {
   };
   cleanupAbandonedOrders();
   setInterval(cleanupAbandonedOrders, ABANDONED_TTL);
+
+  // ── Sync stock for products sold by package variants ──────────────────────
+  const Product = require('./models/Product');
+  const syncVariantStock = async () => {
+    try {
+      const prods = await Product.find({ 'packages.0': { $exists: true } });
+      for (const p of prods) {
+        const total = p.packages.reduce((sum, pkg) => sum + (Number(pkg.stock) || 0), 0);
+        if (p.stock !== total) {
+          await Product.updateOne({ _id: p._id }, { $set: { stock: total } });
+          console.log(`📦 Synced variant stock for "${p.name}": was ${p.stock} → now ${total}`);
+        }
+      }
+    } catch (err) {
+      console.error('⚠️  Variant stock sync error:', err.message);
+    }
+  };
+  syncVariantStock();
 };
 
 // ─── Health check ─────────────────────────────────────────────────────────────
