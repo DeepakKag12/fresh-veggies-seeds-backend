@@ -130,30 +130,57 @@ exports.decrementStockAfterConfirm = async (order) => {
       // there, so two orders racing for the last units cannot both succeed.
       // Checking stock at order time and decrementing here are separate steps,
       // and without this guard the gap between them lets inventory go negative.
-      let updated = await Product.findOneAndUpdate(
-        { _id: item.product, stock: { $gte: item.quantity } },
-        { $inc: { stock: -item.quantity } },
-        { new: true, select: 'name stock' }
-      );
+      let updated;
+      if (item.packageId) {
+        updated = await Product.findOneAndUpdate(
+          { _id: item.product, packages: { $elemMatch: { _id: item.packageId, stock: { $gte: item.quantity } } } },
+          { $inc: { 'packages.$.stock': -item.quantity, stock: -item.quantity } },
+          { new: true, select: 'name stock packages' }
+        );
+      } else {
+        updated = await Product.findOneAndUpdate(
+          { _id: item.product, stock: { $gte: item.quantity } },
+          { $inc: { stock: -item.quantity } },
+          { new: true, select: 'name stock' }
+        );
+      }
 
       if (!updated) {
         // Either the product is gone, or someone else took the units first.
-        const exists = await Product.findById(item.product).select('name stock');
+        const exists = await Product.findById(item.product).select('name stock packages');
         if (!exists) {
           console.error(`⚠️  Stock decrement: product ${item.product} not found`);
           continue;
         }
-        // Oversold. Take the stock to zero and flag it loudly rather than
-        // silently clamping — this needs a human to reconcile the order.
-        console.error(
-          `🚨 OVERSOLD: "${exists.name}" — order ${order._id} needs ${item.quantity} but only ${exists.stock} in stock. Stock set to 0; reconcile manually.`
-        );
-        oversold.push({ name: exists.name, required: item.quantity, available: exists.stock });
-        updated = await Product.findByIdAndUpdate(
-          item.product,
-          { $set: { stock: 0 } },
-          { new: true, select: 'name stock' }
-        );
+
+        if (item.packageId) {
+          const pkg = exists.packages?.id(item.packageId);
+          if (!pkg) {
+             console.error(`⚠️  Stock decrement: package ${item.packageId} not found in product ${item.product}`);
+             continue;
+          }
+          console.error(
+            `🚨 OVERSOLD: "${exists.name}" (Pack) — order ${order._id} needs ${item.quantity} but only ${pkg.stock} in stock. Stock set to 0; reconcile manually.`
+          );
+          oversold.push({ name: `${exists.name} (Pack)`, required: item.quantity, available: pkg.stock });
+          updated = await Product.findOneAndUpdate(
+            { _id: item.product, 'packages._id': item.packageId },
+            { $set: { 'packages.$.stock': 0 } },
+            { new: true, select: 'name stock packages' }
+          );
+        } else {
+          // Oversold. Take the stock to zero and flag it loudly rather than
+          // silently clamping — this needs a human to reconcile the order.
+          console.error(
+            `🚨 OVERSOLD: "${exists.name}" — order ${order._id} needs ${item.quantity} but only ${exists.stock} in stock. Stock set to 0; reconcile manually.`
+          );
+          oversold.push({ name: exists.name, required: item.quantity, available: exists.stock });
+          updated = await Product.findByIdAndUpdate(
+            item.product,
+            { $set: { stock: 0 } },
+            { new: true, select: 'name stock' }
+          );
+        }
       }
 
       if (updated.stock < LOW_STOCK_THRESHOLD) {

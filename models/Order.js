@@ -40,6 +40,10 @@ const orderSchema = new mongoose.Schema({
       type: Number,
       required: true
     },
+    packageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Product.packages'
+    },
     image: String
   }],
   shippingAddress: {
