@@ -19,7 +19,52 @@ const {
 } = require('../config/orderConfig');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+const saveAddressToUser = async (userId, shippingAddress) => {
+  try {
+    if (!userId || !shippingAddress || !shippingAddress.street) return;
+    const user = await User.findById(userId);
+    if (!user) return;
 
+    if (!user.addresses) user.addresses = [];
+
+    // Check if address already exists (same street and pincode)
+    const exists = user.addresses.some(
+      a => (a.street || '').trim().toLowerCase() === (shippingAddress.street || '').trim().toLowerCase() &&
+           (a.pincode || '').trim() === (shippingAddress.pincode || '').trim()
+    );
+
+    const isFirst = user.addresses.length === 0;
+
+    if (!exists) {
+      user.addresses.push({
+        name: shippingAddress.name || user.name,
+        phone: shippingAddress.phone || user.phone,
+        street: shippingAddress.street,
+        city: shippingAddress.city,
+        state: shippingAddress.state,
+        pincode: shippingAddress.pincode,
+        country: shippingAddress.country || 'India',
+        isDefault: isFirst,
+        createdAt: new Date()
+      });
+    }
+
+    // Update user.address to the latest shipping address if user.address is empty or this is first address
+    if (!user.address?.street || isFirst) {
+      user.address = {
+        street: shippingAddress.street,
+        city: shippingAddress.city,
+        state: shippingAddress.state,
+        pincode: shippingAddress.pincode,
+        country: shippingAddress.country || 'India'
+      };
+    }
+
+    await user.save({ validateBeforeSave: false });
+  } catch (err) {
+    console.error('Error saving address to user profile:', err.message);
+  }
+};
 
 // @desc    Create new COD order (server-side price validation)
 // @route   POST /api/orders
@@ -115,6 +160,9 @@ exports.createOrder = async (req, res) => {
       if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
       throw createErr;
     }
+
+    // ── Save address to user profile for future orders ───────────────────────
+    saveAddressToUser(req.user._id, shippingAddress).catch(() => {});
 
     // ── Notify (fire-and-forget: a mail outage must not fail a placed order) ──
     notify.sendOrderConfirmation(order, req.user).catch((e) =>

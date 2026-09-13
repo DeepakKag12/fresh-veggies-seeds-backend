@@ -14,7 +14,11 @@ const {
   verifyOTP,
   getCart,
   updateCart,
-  verifyEmail
+  verifyEmail,
+  addAddress,
+  updateAddress,
+  deleteAddress,
+  setDefaultAddress
 } = require('../controllers/authController');
 const { protect } = require('../middleware/auth');
 
@@ -39,5 +43,11 @@ router.put('/cart', protect, updateCart);
 router.put('/profile', protect, updateProfile);
 router.put('/change-email', protect, changeEmail);
 router.put('/change-password', protect, changePassword);
+
+// Delivery address management
+router.post('/addresses', protect, addAddress);
+router.put('/addresses/:addressId', protect, updateAddress);
+router.delete('/addresses/:addressId', protect, deleteAddress);
+router.put('/addresses/:addressId/default', protect, setDefaultAddress);
 
 module.exports = router;

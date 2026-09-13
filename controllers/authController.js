@@ -198,6 +198,7 @@ exports.login = async (req, res) => {
         phone: user.phone,
         role: user.role,
         address: user.address,
+        addresses: user.addresses || [],
         token
       }
     });
@@ -240,6 +241,24 @@ exports.verifyEmail = async (req, res) => {
 exports.getMe = async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select('-emailVerificationToken -emailVerificationExpires -resetPasswordToken -resetPasswordExpires -otpToken -otpExpires');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Backfill addresses if legacy address exists and addresses is empty
+    if ((!user.addresses || user.addresses.length === 0) && user.address?.street) {
+      user.addresses = [{
+        name: user.name,
+        phone: user.phone,
+        street: user.address.street,
+        city: user.address.city,
+        state: user.address.state,
+        pincode: user.address.pincode,
+        country: user.address.country || 'India',
+        isDefault: true,
+        createdAt: new Date()
+      }];
+      await user.save({ validateBeforeSave: false });
+    }
+
     res.status(200).json({
       success: true,
       data: user
@@ -329,11 +348,33 @@ exports.updateProfile = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Nothing to update.' });
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.user._id,
-      updates,
-      { new: true, runValidators: true }
-    );
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    if (updates.name) user.name = updates.name;
+    if (updates.phone) user.phone = updates.phone;
+    if (updates.address) {
+      user.address = updates.address;
+      if (!user.addresses) user.addresses = [];
+      const defaultAddr = user.addresses.find(a => a.isDefault);
+      if (defaultAddr) {
+        defaultAddr.street = updates.address.street;
+        defaultAddr.city = updates.address.city;
+        defaultAddr.state = updates.address.state;
+        defaultAddr.pincode = updates.address.pincode;
+        defaultAddr.country = updates.address.country;
+      } else if (updates.address.street) {
+        user.addresses.push({
+          name: user.name,
+          phone: user.phone,
+          ...updates.address,
+          isDefault: true,
+          createdAt: new Date()
+        });
+      }
+    }
+
+    await user.save();
 
     res.status(200).json({
       success: true,
@@ -744,6 +785,7 @@ exports.verifyOTP = async (req, res) => {
         phone: user.phone,
         role: user.role,
         address: user.address,
+        addresses: user.addresses || [],
         token: generateToken(user)
       }
     });
@@ -771,3 +813,191 @@ exports.logout = async (req, res) => {
     res.status(500).json({ success: false, message: 'Unable to log out right now. Please try again.' });
   }
 };
+
+// @desc    Add a new delivery address
+// @route   POST /api/auth/addresses
+// @access  Private
+exports.addAddress = async (req, res) => {
+  try {
+    const { name, phone, street, city, state, pincode, country, isDefault } = req.body;
+    if (!street || !city || !state || !pincode) {
+      return res.status(400).json({ success: false, message: 'Street, city, state, and pincode are required.' });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    if (!user.addresses) user.addresses = [];
+
+    const isFirst = user.addresses.length === 0;
+    const shouldBeDefault = isDefault === true || isFirst;
+
+    if (shouldBeDefault) {
+      user.addresses.forEach(addr => { addr.isDefault = false; });
+    }
+
+    const newAddress = {
+      name: cleanText(name || user.name, 100),
+      phone: cleanText(phone || user.phone, 20),
+      street: cleanText(street, 200),
+      city: cleanText(city, 100),
+      state: cleanText(state, 100),
+      pincode: cleanText(pincode, 10),
+      country: cleanText(country, 100) || 'India',
+      isDefault: shouldBeDefault,
+      createdAt: new Date()
+    };
+
+    user.addresses.push(newAddress);
+
+    if (shouldBeDefault) {
+      user.address = {
+        street: newAddress.street,
+        city: newAddress.city,
+        state: newAddress.state,
+        pincode: newAddress.pincode,
+        country: newAddress.country
+      };
+    }
+
+    await user.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Address added successfully',
+      data: user
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → addAddress');
+  }
+};
+
+// @desc    Update a delivery address
+// @route   PUT /api/auth/addresses/:addressId
+// @access  Private
+exports.updateAddress = async (req, res) => {
+  try {
+    const { addressId } = req.params;
+    const { name, phone, street, city, state, pincode, country, isDefault } = req.body;
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const addr = user.addresses?.id(addressId);
+    if (!addr) {
+      return res.status(404).json({ success: false, message: 'Address not found' });
+    }
+
+    if (name !== undefined) addr.name = cleanText(name, 100);
+    if (phone !== undefined) addr.phone = cleanText(phone, 20);
+    if (street !== undefined) addr.street = cleanText(street, 200);
+    if (city !== undefined) addr.city = cleanText(city, 100);
+    if (state !== undefined) addr.state = cleanText(state, 100);
+    if (pincode !== undefined) addr.pincode = cleanText(pincode, 10);
+    if (country !== undefined) addr.country = cleanText(country, 100) || 'India';
+
+    if (isDefault === true) {
+      user.addresses.forEach(a => { a.isDefault = false; });
+      addr.isDefault = true;
+      user.address = {
+        street: addr.street,
+        city: addr.city,
+        state: addr.state,
+        pincode: addr.pincode,
+        country: addr.country
+      };
+    } else if (addr.isDefault && isDefault === false) {
+      addr.isDefault = false;
+    }
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Address updated successfully',
+      data: user
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → updateAddress');
+  }
+};
+
+// @desc    Delete a delivery address
+// @route   DELETE /api/auth/addresses/:addressId
+// @access  Private
+exports.deleteAddress = async (req, res) => {
+  try {
+    const { addressId } = req.params;
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const addr = user.addresses?.id(addressId);
+    if (!addr) {
+      return res.status(404).json({ success: false, message: 'Address not found' });
+    }
+
+    const wasDefault = addr.isDefault;
+    user.addresses.pull(addressId);
+
+    if (wasDefault && user.addresses.length > 0) {
+      user.addresses[0].isDefault = true;
+      user.address = {
+        street: user.addresses[0].street,
+        city: user.addresses[0].city,
+        state: user.addresses[0].state,
+        pincode: user.addresses[0].pincode,
+        country: user.addresses[0].country
+      };
+    } else if (user.addresses.length === 0) {
+      user.address = { street: '', city: '', state: '', pincode: '', country: 'India' };
+    }
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Address removed successfully',
+      data: user
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → deleteAddress');
+  }
+};
+
+// @desc    Set default delivery address
+// @route   PUT /api/auth/addresses/:addressId/default
+// @access  Private
+exports.setDefaultAddress = async (req, res) => {
+  try {
+    const { addressId } = req.params;
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const addr = user.addresses?.id(addressId);
+    if (!addr) {
+      return res.status(404).json({ success: false, message: 'Address not found' });
+    }
+
+    user.addresses.forEach(a => { a.isDefault = false; });
+    addr.isDefault = true;
+
+    user.address = {
+      street: addr.street,
+      city: addr.city,
+      state: addr.state,
+      pincode: addr.pincode,
+      country: addr.country
+    };
+
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Default address updated',
+      data: user
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → setDefaultAddress');
+  }
+};
+

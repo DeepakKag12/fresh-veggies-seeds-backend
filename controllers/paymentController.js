@@ -12,8 +12,50 @@ const notify        = require('../services/orderNotificationService');
 // Shared with orderController so COD and online checkouts price identically.
 const { computeShippingPrice } = require('../config/orderConfig');
 const statsCache = require('../utils/statsCache');
-const { serverError } = require('../utils/respond');
+const saveAddressToUser = async (userId, shippingAddress) => {
+  try {
+    if (!userId || !shippingAddress || !shippingAddress.street) return;
+    const user = await User.findById(userId);
+    if (!user) return;
 
+    if (!user.addresses) user.addresses = [];
+
+    const exists = user.addresses.some(
+      a => (a.street || '').trim().toLowerCase() === (shippingAddress.street || '').trim().toLowerCase() &&
+           (a.pincode || '').trim() === (shippingAddress.pincode || '').trim()
+    );
+
+    const isFirst = user.addresses.length === 0;
+
+    if (!exists) {
+      user.addresses.push({
+        name: shippingAddress.name || user.name,
+        phone: shippingAddress.phone || user.phone,
+        street: shippingAddress.street,
+        city: shippingAddress.city,
+        state: shippingAddress.state,
+        pincode: shippingAddress.pincode,
+        country: shippingAddress.country || 'India',
+        isDefault: isFirst,
+        createdAt: new Date()
+      });
+    }
+
+    if (!user.address?.street || isFirst) {
+      user.address = {
+        street: shippingAddress.street,
+        city: shippingAddress.city,
+        state: shippingAddress.state,
+        pincode: shippingAddress.pincode,
+        country: shippingAddress.country || 'India'
+      };
+    }
+
+    await user.save({ validateBeforeSave: false });
+  } catch (err) {
+    console.error('Error saving address to user profile:', err.message);
+  }
+};
 
 // @desc    Create Razorpay Order (price computed on server)
 // @route   POST /api/payments/create-order
@@ -92,6 +134,9 @@ exports.createRazorpayOrder = async (req, res) => {
       },
       statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Awaiting online payment' }]
     });
+
+    // ── Save address to user profile for future orders ───────────────────────
+    saveAddressToUser(req.user._id, shippingAddress).catch(() => {});
 
     res.status(200).json({
       success: true,

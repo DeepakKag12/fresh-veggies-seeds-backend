@@ -38,6 +38,17 @@ const userSchema = new mongoose.Schema({
     pincode: String,
     country: { type: String, default: 'India' }
   },
+  addresses: [{
+    name: { type: String, trim: true },
+    phone: { type: String, trim: true },
+    street: { type: String, trim: true },
+    city: { type: String, trim: true },
+    state: { type: String, trim: true },
+    pincode: { type: String, trim: true },
+    country: { type: String, default: 'India', trim: true },
+    isDefault: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+  }],
   cart: {
     type: [mongoose.Schema.Types.Mixed],
     default: []
