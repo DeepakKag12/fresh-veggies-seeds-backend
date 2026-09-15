@@ -14,9 +14,11 @@ exports.getAllReviews = async (req, res) => {
     const query = {};
 
     if (status === 'pending') {
-      query.isApproved = false;
+      query.$or = [{ status: 'pending' }, { isApproved: false, status: { $exists: false } }];
     } else if (status === 'approved') {
-      query.isApproved = true;
+      query.$or = [{ status: 'approved' }, { isApproved: true }];
+    } else if (status === 'rejected') {
+      query.status = 'rejected';
     }
 
     const page  = Math.max(1, parseInt(req.query.page) || 1);
@@ -87,6 +89,48 @@ exports.getProductReviews = async (req, res) => {
   }
 };
 
+// @desc    Check if user is eligible to review a product
+// @route   GET /api/reviews/eligibility/:productId
+// @access  Private
+exports.checkReviewEligibility = async (req, res) => {
+  try {
+    const { productId } = req.params;
+    const userId = req.user._id;
+
+    if (!mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(400).json({ success: false, message: 'Invalid product id.' });
+    }
+
+    // Check if user already reviewed
+    const existingReview = await Review.findOne({ productId, userId }).lean();
+
+    // Check if user has a DELIVERED order containing this product
+    const deliveredOrder = await Order.findOne({
+      userId,
+      orderStatus: 'Delivered',
+      'orderItems.product': productId
+    }).sort({ createdAt: -1 }).select('_id createdAt orderNumber').lean();
+
+    const isVerifiedBuyer = !!deliveredOrder;
+    const canReview = isVerifiedBuyer && !existingReview;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        canReview,
+        hasReviewed: !!existingReview,
+        existingReview: existingReview || null,
+        isVerifiedBuyer,
+        deliveredOrderId: deliveredOrder?._id || null,
+        deliveredOrderNumber: deliveredOrder?.orderNumber || null
+      }
+    });
+  } catch (error) {
+    console.error('checkReviewEligibility error:', error.message);
+    res.status(500).json({ success: false, message: 'Failed to verify review eligibility.' });
+  }
+};
+
 // @desc    Create review
 // @route   POST /api/reviews
 // @access  Private
@@ -96,7 +140,6 @@ exports.createReview = async (req, res) => {
     const userId = req.user._id;
 
     // ── Validation ────────────────────────────────────────────────────────────
-    // These previously fell through to Mongoose and surfaced as raw 500s.
     if (!mongoose.Types.ObjectId.isValid(productId)) {
       return res.status(400).json({ success: false, message: 'A valid product id is required.' });
     }
@@ -106,13 +149,17 @@ exports.createReview = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Rating must be a whole number between 1 and 5.' });
     }
 
+    if (!title || !title.trim()) {
+      return res.status(400).json({ success: false, message: 'Review headline is required.' });
+    }
+
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ success: false, message: 'Review comment is required.' });
+    }
+
     const product = await Product.findById(productId).select('_id').lean();
     if (!product) {
       return res.status(404).json({ success: false, message: 'Product not found.' });
-    }
-
-    if (orderId && !mongoose.Types.ObjectId.isValid(orderId)) {
-      return res.status(400).json({ success: false, message: 'Invalid order id.' });
     }
 
     // Friendly pre-check; the unique (productId, userId) index is the real guard.
@@ -120,20 +167,29 @@ exports.createReview = async (req, res) => {
     if (existingReview) {
       return res.status(409).json({
         success: false,
-        message: 'You have already reviewed this product'
+        message: 'You have already reviewed this product. You can update your existing review.'
       });
     }
 
-    // Check if verified purchase
-    let isVerifiedPurchase = false;
-    if (orderId) {
-      const order = await Order.findOne({
-        _id: orderId,
-        userId,
-        'orderItems.product': productId,
-        orderStatus: 'Delivered'
+    // ── Purchase & Delivery Verification ───────────────────────────────────────
+    // Only a customer who has purchased the product in an order that has reached
+    // 'Delivered' status may write a review.
+    let orderQuery = {
+      userId,
+      orderStatus: 'Delivered',
+      'orderItems.product': productId
+    };
+
+    if (orderId && mongoose.Types.ObjectId.isValid(orderId)) {
+      orderQuery._id = orderId;
+    }
+
+    const verifiedOrder = await Order.findOne(orderQuery).sort({ createdAt: -1 }).select('_id').lean();
+    if (!verifiedOrder) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only customers who have purchased and received this product can write a review.'
       });
-      isVerifiedPurchase = !!order;
     }
 
     let review;
@@ -141,25 +197,27 @@ exports.createReview = async (req, res) => {
       review = await Review.create({
         productId,
         userId,
-        orderId: orderId || undefined,
+        orderId: verifiedOrder._id,
         rating: numericRating,
-        title,
-        comment,
-        isVerifiedPurchase
+        title: title.trim().slice(0, 100),
+        comment: comment.trim().slice(0, 1000),
+        isVerifiedPurchase: true,
+        isApproved: false // Requires moderation before public display
       });
     } catch (err) {
-      // The unique index caught a concurrent duplicate the pre-check missed.
       if (err.code === 11000) {
-        return res.status(409).json({ success: false, message: 'You have already reviewed this product' });
+        return res.status(409).json({ success: false, message: 'You have already reviewed this product.' });
       }
       throw err;
     }
 
-    // Reviews start unapproved (Review schema default), so a new one cannot move
-    // the product's rating until an admin approves it. Recalculating here would
-    // be a no-op; approveReview is what triggers it.
+    statsCache.invalidate('admin:');
 
-    res.status(201).json({ success: true, data: review });
+    res.status(201).json({
+      success: true,
+      message: 'Review submitted successfully! It will appear after moderation approval.',
+      data: review
+    });
   } catch (error) {
     if (error.name === 'ValidationError') {
       return res.status(400).json({
@@ -169,6 +227,53 @@ exports.createReview = async (req, res) => {
     }
     console.error('createReview error:', error.message);
     res.status(500).json({ success: false, message: 'Failed to submit review.' });
+  }
+};
+
+// @desc    Update review (Customer)
+// @route   PUT /api/reviews/:id
+// @access  Private
+exports.updateReview = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rating, title, comment } = req.body;
+    const userId = req.user._id;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid review id.' });
+    }
+
+    const review = await Review.findOne({ _id: id, userId });
+    if (!review) {
+      return res.status(404).json({ success: false, message: 'Review not found or unauthorized.' });
+    }
+
+    if (rating !== undefined) {
+      const numRating = Number(rating);
+      if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
+        return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5.' });
+      }
+      review.rating = numRating;
+    }
+
+    if (title) review.title = String(title).trim().slice(0, 100);
+    if (comment) review.comment = String(comment).trim().slice(0, 1000);
+    review.isApproved = false; // Re-requires approval upon editing
+
+    await review.save();
+
+    // Recalculate rating because if it was previously approved, unapproving it updates the score
+    await updateProductRating(review.productId);
+    statsCache.invalidate('admin:');
+
+    res.status(200).json({
+      success: true,
+      message: 'Review updated successfully! It will be reviewed by admin.',
+      data: review
+    });
+  } catch (error) {
+    console.error('updateReview error:', error.message);
+    res.status(500).json({ success: false, message: 'Failed to update review.' });
   }
 };
 
@@ -190,7 +295,10 @@ exports.approveReview = async (req, res) => {
       });
     }
 
-    const update = { isApproved };
+    const update = {
+      isApproved,
+      status: isApproved ? 'approved' : 'rejected'
+    };
     if (adminResponse !== undefined) {
       update.adminResponse = String(adminResponse).trim().slice(0, 500);
     }

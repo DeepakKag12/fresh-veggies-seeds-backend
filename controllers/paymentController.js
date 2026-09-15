@@ -10,7 +10,7 @@ const { buildVerifiedItems } = require('../services/pricingService');
 const notify        = require('../services/orderNotificationService');
 
 // Shared with orderController so COD and online checkouts price identically.
-const { computeShippingPrice } = require('../config/orderConfig');
+const { computeShippingPrice, computeOnlineDiscount, getShippingRules } = require('../config/orderConfig');
 const statsCache = require('../utils/statsCache');
 const saveAddressToUser = async (userId, shippingAddress) => {
   try {
@@ -84,8 +84,17 @@ exports.createRazorpayOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: e.message });
     }
 
+    // ── Load dynamic rules ───────────────────────────────────────────────────
+    const rules = await getShippingRules();
+    if (rules.minOrderAmount && computedItemsPrice < rules.minOrderAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Minimum order amount is ₹${rules.minOrderAmount}. Current items total is ₹${computedItemsPrice}.`
+      });
+    }
+
     // ── Server-side delivery charge ───────────────────────────────────────────
-    const shippingPrice = computeShippingPrice(computedItemsPrice);
+    const shippingPrice = computeShippingPrice(computedItemsPrice, rules.freeDeliveryThreshold, rules.deliveryCharge);
 
     // ── Coupon: validated and priced on the server, then claimed ──────────────
     let discountAmount = 0;
@@ -99,7 +108,15 @@ exports.createRazorpayOrder = async (req, res) => {
       throw e;
     }
 
-    const computedTotal = computedItemsPrice + shippingPrice - discountAmount;
+    // ── Online Payment Incentive Discount ────────────────────────────────────
+    const onlineDiscount = computeOnlineDiscount(
+      computedItemsPrice,
+      rules.onlineDiscountType,
+      rules.onlineDiscountValue,
+      rules.onlineDiscountMaxLimit
+    );
+
+    const computedTotal = computedItemsPrice + shippingPrice - discountAmount - onlineDiscount;
 
     if (computedTotal <= 0) {
       if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
@@ -127,6 +144,7 @@ exports.createRazorpayOrder = async (req, res) => {
       itemsPrice:    computedItemsPrice,
       shippingPrice,
       discountAmount,
+      onlineDiscount,
       couponUsed,
       totalAmount:   computedTotal,
       paymentDetails: {
@@ -455,13 +473,17 @@ exports.refundPayment = async (req, res) => {
     const { orderId, reason } = req.body;
 
     // ── Atomic claim: only one request can ever enter the refund path ─────────
-    // Transitions refundStatus from (no refund) → 'Pending' as an atomic op.
+    // Transitions refundStatus from (no refund / Failed) → 'Pending' as an atomic op.
     // A second concurrent request finds refundStatus already set → 409.
     const order = await Order.findOneAndUpdate(
       {
         _id:           orderId,
-        paymentStatus: 'Paid',
-        'refund.refundStatus': { $exists: false }  // no refund record yet
+        paymentStatus: { $in: ['Paid', 'Refunded'] },
+        $or: [
+          { 'refund.refundStatus': { $exists: false } },
+          { 'refund.refundStatus': 'Failed' },
+          { 'refund.refundStatus': null }
+        ]
       },
       { $set: { 'refund.refundStatus': 'Pending', 'refund.refundAmount': 0 } },
       { new: true }
@@ -471,7 +493,8 @@ exports.refundPayment = async (req, res) => {
       // Distinguish between "not found" and "already refunded"
       const existing = await Order.findById(orderId);
       if (!existing)                              return res.status(404).json({ success: false, message: 'Order not found' });
-      if (existing.paymentStatus !== 'Paid')      return res.status(400).json({ success: false, message: 'Order is not in a paid state' });
+      if (existing.paymentStatus !== 'Paid' && existing.paymentStatus !== 'Refunded')
+        return res.status(400).json({ success: false, message: 'Order is not in a refundable state' });
       if (existing.refund?.refundStatus === 'Processed')
         return res.status(409).json({ success: false, message: 'Refund already processed for this order', data: existing.refund });
       return res.status(409).json({ success: false, message: 'Refund already in progress' });
@@ -489,7 +512,7 @@ exports.refundPayment = async (req, res) => {
     const refundResponse = await razorpayService.refundPayment(paymentId, refundAmount);
 
     if (!refundResponse.success) {
-      // Mark as Failed so admin sees it, but don't leave it stuck as Pending
+      // Mark as Failed so admin sees it and can retry later, but don't leave it stuck as Pending
       await Order.updateOne({ _id: orderId }, { $set: {
         'refund.refundStatus': 'Failed',
         'refund.refundAmount': refundAmount,
@@ -510,8 +533,36 @@ exports.refundPayment = async (req, res) => {
           'refund.refundStatus':  'Processed',
           'refund.refundedAt':    new Date(),
           'refund.reason':        reason || 'Admin initiated refund'
+      },
+      $push: {
+        statusHistory: {
+          status: 'Cancelled',
+          from: order.orderStatus,
+          changedAt: new Date(),
+          changedBy: req.user._id,
+          note: `Refund of ₹${refundAmount} processed (${refundResponse.data.id})`
+        }
       }},
       { new: true }
+    );
+
+    // Release stock and coupon
+    await stockService.restoreStockAfterCancel(updatedOrder).catch((err) =>
+      console.error('⚠️  Stock restore error (admin refund):', err.message)
+    );
+    if (updatedOrder.couponUsed?.couponId) {
+      await couponService.releaseCoupon(updatedOrder.couponUsed.couponId).catch((err) =>
+        console.error('⚠️  Coupon release error (admin refund):', err.message)
+      );
+    }
+
+    // Notify customer
+    const customer = await User.findById(updatedOrder.userId).select('name email phone');
+    notify.sendStatusUpdate(updatedOrder, customer, 'Cancelled').catch((err) =>
+      console.error('⚠️  Cancellation email failed (admin refund):', err.message)
+    );
+    notify.sendRefundNotification(updatedOrder, customer).catch((err) =>
+      console.error('⚠️  Refund email failed (admin refund):', err.message)
     );
 
     res.status(200).json({

@@ -43,9 +43,13 @@ exports.getProducts = async (req, res) => {
     }
 
     // Filter by season — plain string whitelist
-    const ALLOWED_SEASONS = ['Summer', 'Winter', 'Monsoon', 'AllSeason', 'Spring'];
+    const ALLOWED_SEASONS = ['Summer', 'Winter', 'Spring', 'Autumn', 'All Season', 'AllSeason', 'Monsoon'];
     if (season && ALLOWED_SEASONS.includes(season)) {
-      query.season = season;
+      if (season === 'AllSeason' || season === 'All Season') {
+        query.season = { $in: ['All Season', 'AllSeason'] };
+      } else {
+        query.season = season;
+      }
     }
 
     // Search by name (with fuzzy matching for misspellings)

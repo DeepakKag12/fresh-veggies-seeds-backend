@@ -13,9 +13,10 @@
 const Product = require('../models/Product');
 const Order   = require('../models/Order');
 const Combo   = require('../models/Combo');
+const Settings = require('../models/Settings');
 const emailService = require('./emailService');
 
-const LOW_STOCK_THRESHOLD = parseInt(process.env.LOW_STOCK_THRESHOLD) || 10;
+const DEFAULT_LOW_STOCK_THRESHOLD = parseInt(process.env.LOW_STOCK_THRESHOLD) || 10;
 
 /**
  * Decrement stock for every Product line item in a confirmed order,
@@ -91,10 +92,37 @@ exports.reserveStock = async (items) => {
       throw err;
     }
 
-    taken.push({ product: item.product, quantity: qty, packageId: item.packageId, productType: item.productType });
+    taken.push({ product: item.product, quantity: qty, packageId: item.packageId, productType: item.productType, name: item.name });
   }
 
   return true;
+};
+
+/**
+ * Return reserved units if order creation fails before completion.
+ * @param {Array} items verifiedItems from pricingService
+ */
+exports.restoreReservedStock = async (items) => {
+  if (!Array.isArray(items) || items.length === 0) return;
+  for (const t of items) {
+    const qty = Number(t.quantity) || 0;
+    if (qty <= 0) continue;
+    try {
+      if (t.packageId) {
+        await Product.updateOne(
+          { _id: t.product, 'packages._id': t.packageId },
+          { $inc: { 'packages.$.stock': qty, stock: qty } }
+        );
+      } else if (t.productType === 'Combo') {
+        await Combo.updateOne({ _id: t.product }, { $inc: { stock: qty } });
+      } else {
+        await Product.updateOne({ _id: t.product }, { $inc: { stock: qty } });
+      }
+      console.log(`↩ Restored reserved stock for ${t.name || t.product}: +${qty}`);
+    } catch (e) {
+      console.error('⚠️  Failed to restore reserved stock:', e.message);
+    }
+  }
 };
 
 exports.decrementStockAfterConfirm = async (order) => {
@@ -121,8 +149,29 @@ exports.decrementStockAfterConfirm = async (order) => {
   const lowStockItems = [];
   const oversold      = [];
 
+  const settings = await Settings.getSingleton().catch(() => null);
+  const lowStockThreshold = settings?.inventory?.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
+
   for (const item of order.orderItems) {
-    // Combos don't have independent stock — only decrement Product items
+    if (item.productType === 'Combo') {
+      try {
+        const updatedCombo = await Combo.findOneAndUpdate(
+          { _id: item.product, stock: { $gte: item.quantity } },
+          { $inc: { stock: -item.quantity } },
+          { new: true, select: 'name stock' }
+        );
+        if (!updatedCombo) {
+          console.error(`🚨 OVERSOLD COMBO: order ${order._id} needs ${item.quantity} of combo ${item.product}`);
+          oversold.push({ name: item.name || 'Combo', required: item.quantity, available: 0 });
+          await Combo.findByIdAndUpdate(item.product, { $set: { stock: 0 } });
+        }
+      } catch (err) {
+        console.error(`⚠️  Stock decrement error for combo ${item.product}:`, err.message);
+      }
+      continue;
+    }
+
+    // Only decrement Product items
     if (item.productType !== 'Product') continue;
 
     try {
@@ -183,9 +232,9 @@ exports.decrementStockAfterConfirm = async (order) => {
         }
       }
 
-      if (updated.stock < LOW_STOCK_THRESHOLD) {
+      if (updated.stock < lowStockThreshold) {
         lowStockItems.push({ name: updated.name, stock: updated.stock });
-        console.log(`⚠️  Low stock: "${updated.name}" → ${updated.stock} units remaining`);
+        console.log(`⚠️  Low stock: "${updated.name}" → ${updated.stock} units remaining (threshold: ${lowStockThreshold})`);
       }
     } catch (err) {
       console.error(`⚠️  Stock decrement error for product ${item.product}:`, err.message);
@@ -193,8 +242,6 @@ exports.decrementStockAfterConfirm = async (order) => {
   }
 
   // ── Record any oversell on the order so it is actionable ───────────────────
-  // A log line alone gets lost. Persisting it lets the admin order view flag
-  // the order as needing manual reconciliation.
   if (oversold.length > 0) {
     try {
       await Order.updateOne(
@@ -206,8 +253,8 @@ exports.decrementStockAfterConfirm = async (order) => {
     }
   }
 
-  // ── Fire-and-forget low-stock alert email ──────────────────────────────────
-  if (lowStockItems.length > 0) {
+  // ── Fire-and-forget low-stock alert email if enabled ───────────────────────
+  if (lowStockItems.length > 0 && settings?.notifications?.admin?.lowStock?.email !== false) {
     emailService.sendLowStockAlertEmail(lowStockItems).catch((err) =>
       console.error('⚠️  Low-stock email error:', err.message)
     );
@@ -250,7 +297,23 @@ exports.restoreStockAfterCancel = async (order) => {
   }
 
   for (const item of order.orderItems) {
-    // Combos have no independent stock, matching the decrement side.
+    if (item.productType === 'Combo') {
+      try {
+        const updated = await Combo.findByIdAndUpdate(
+          item.product,
+          { $inc: { stock: item.quantity } },
+          { new: true, select: 'name stock' }
+        );
+        if (updated) {
+          console.log(`↩ Restored ${item.quantity} unit(s) of Combo "${updated.name}" → ${updated.stock} in stock`);
+        }
+      } catch (err) {
+        console.error(`⚠️  Stock restore error for combo ${item.product}:`, err.message);
+      }
+      continue;
+    }
+
+    // Only restore Product items
     if (item.productType !== 'Product') continue;
 
     try {

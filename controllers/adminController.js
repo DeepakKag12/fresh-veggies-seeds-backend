@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
 const Review = require('../models/Review');
+const Settings = require('../models/Settings');
 const statsCache = require('../utils/statsCache');
 const { serverError } = require('../utils/respond');
 
@@ -14,6 +15,10 @@ exports.getDashboardStats = async (req, res) => {
     // effectively live while collapsing repeat loads into one set of queries.
     const cached = statsCache.get('admin:stats');
     if (cached) return res.status(200).json(cached);
+
+    // ── Load dynamic store settings ──────────────────────────────────────────
+    const settings = await Settings.getSingleton().catch(() => null);
+    const lowStockCutoff = settings?.inventory?.lowStockThreshold ?? 10;
 
     // ── Date helpers ─────────────────────────────────────────────────────────
     const today = new Date();
@@ -29,10 +34,11 @@ exports.getDashboardStats = async (req, res) => {
     // ── Run all queries in parallel ───────────────────────────────────────────
     const [
       totalOrders, totalUsers, totalProducts,
-      pendingOrders, confirmedOrders, shippedOrders,
+      pendingOrders, confirmedOrders, packedOrders, shippedOrders,
       deliveredOrders, cancelledOrders, cancellationRequests,
-      failedPayments, lowStockProducts, pendingReviews,
-      todayOrders,
+      failedPayments, lowStockProducts, outOfStockProducts, pendingReviews,
+      todayOrders, todayUsers,
+      urgentOrders,
       revAll, revOnline, revCOD, revRefunded,
       revToday, revTodayOnline, revTodayCOD,
       revMonth, revLastMonth,
@@ -44,14 +50,24 @@ exports.getDashboardStats = async (req, res) => {
 
       Order.countDocuments({ ...realOrder, orderStatus: 'Pending'               }),
       Order.countDocuments({ ...realOrder, orderStatus: 'Confirmed'             }),
+      Order.countDocuments({ ...realOrder, orderStatus: 'Packed'                }),
       Order.countDocuments({ ...realOrder, orderStatus: 'Shipped'               }),
       Order.countDocuments({ ...realOrder, orderStatus: 'Delivered'             }),
       Order.countDocuments({ ...realOrder, orderStatus: 'Cancelled'             }),
       Order.countDocuments({ ...realOrder, orderStatus: 'CancellationRequested' }),
       Order.countDocuments({ paymentStatus: 'Failed' }),
-      Product.countDocuments({ stock: { $lt: 10 } }),
-      Review.countDocuments({ isApproved: false }),
+      Product.countDocuments({ stock: { $gt: 0, $lte: lowStockCutoff } }),
+      Product.countDocuments({ stock: { $lte: 0 } }),
+      Review.countDocuments({ isApproved: false, status: { $ne: 'rejected' } }),
       Order.countDocuments({ ...realOrder, createdAt: { $gte: today } }),
+      User.countDocuments({ role: 'customer', createdAt: { $gte: today } }),
+
+      // Urgent orders requiring immediate action
+      Order.find({ ...realOrder, orderStatus: { $in: ['Pending', 'CancellationRequested'] } })
+        .populate('userId', 'name email phone')
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
 
       // ── Revenue: only Paid orders ─────────────────────────────────────────
       Order.aggregate([{ $match: { paymentStatus: 'Paid' } },
@@ -89,10 +105,12 @@ exports.getDashboardStats = async (req, res) => {
       data: {
         // Counts
         totalOrders, totalUsers, totalProducts,
-        pendingOrders, confirmedOrders, shippedOrders,
+        pendingOrders, confirmedOrders, packedOrders, shippedOrders,
         deliveredOrders, cancelledOrders, cancellationRequests,
-        failedPayments, lowStockProducts, pendingReviews,
-        todayOrders,
+        failedPayments, lowStockProducts, outOfStockProducts, pendingReviews,
+        todayOrders, todayUsers,
+        actionRequiredCount: pendingOrders + cancellationRequests,
+        urgentOrders,
         // Revenue (only from paid orders)
         totalRevenue:       g(revAll),
         onlineRevenue:      g(revOnline),

@@ -152,10 +152,13 @@ const connectDB = async () => {
 
   // ── Abandoned order cleanup (only schedule once per warm instance) ──────
   const Order = require('./models/Order');
-  const ABANDONED_TTL = 30 * 60 * 1000;
+  const Settings = require('./models/Settings');
   const cleanupAbandonedOrders = async () => {
     try {
-      const cutoff = new Date(Date.now() - ABANDONED_TTL);
+      const settings = await Settings.getSingleton().catch(() => null);
+      if (settings && !settings.orders.autoCancelUnpaidOrders) return;
+      const ttlMinutes = settings?.orders?.unpaidOrderTimeoutMinutes || 30;
+      const cutoff = new Date(Date.now() - ttlMinutes * 60 * 1000);
       const result = await Order.updateMany(
         { paymentMode: { $in: ['Online', 'UPI'] }, paymentStatus: 'Pending', createdAt: { $lt: cutoff } },
         { $set: { paymentStatus: 'Failed' } }
@@ -167,7 +170,7 @@ const connectDB = async () => {
     }
   };
   cleanupAbandonedOrders();
-  setInterval(cleanupAbandonedOrders, ABANDONED_TTL);
+  setInterval(cleanupAbandonedOrders, 10 * 60 * 1000);
 
   // ── Sync stock for products sold by package variants ──────────────────────
   const Product = require('./models/Product');
@@ -259,6 +262,7 @@ app.use('/api/upload',      require('./routes/uploadRoutes'));
 app.use('/api/coupons',     require('./routes/couponRoutes'));
 app.use('/api/reviews',     require('./routes/reviewRoutes'));
 app.use('/api/banners',     require('./routes/bannerRoutes'));
+app.use('/api/settings',    require('./routes/settingsRoutes'));
 
 // ─── Root / Health ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {

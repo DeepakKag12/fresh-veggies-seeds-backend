@@ -14,9 +14,11 @@ const { serverError } = require('../utils/respond');
 // so COD and online checkouts can never price or transition differently.
 const {
   computeShippingPrice,
+  getShippingRules,
   ALLOWED_TRANSITIONS,
   SHIPPABLE_STATUSES,
 } = require('../config/orderConfig');
+const Settings = require('../models/Settings');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const saveAddressToUser = async (userId, shippingAddress) => {
@@ -104,8 +106,27 @@ exports.createOrder = async (req, res) => {
       return res.status(outOfStock ? 409 : 400).json({ success: false, message: e.message });
     }
 
+    // ── Load dynamic store rules ─────────────────────────────────────────────
+    const rules = await getShippingRules();
+
+    // Minimum basket requirement
+    if (rules.minOrderAmount && computedItemsPrice < rules.minOrderAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Minimum order amount is ₹${rules.minOrderAmount}. Current items total is ₹${computedItemsPrice}.`
+      });
+    }
+
+    // COD availability check
+    if ((paymentMode === 'COD' || !paymentMode) && !rules.codAvailable) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cash on Delivery is currently disabled. Please choose Online Payment.'
+      });
+    }
+
     // ── Server-side delivery charge ───────────────────────────────────────────
-    const shippingPrice = computeShippingPrice(computedItemsPrice);
+    const shippingPrice = computeShippingPrice(computedItemsPrice, rules.freeDeliveryThreshold, rules.deliveryCharge);
 
     // ── Coupon: validated and priced on the server, then claimed ──────────────
     let discountAmount = 0;
@@ -119,7 +140,17 @@ exports.createOrder = async (req, res) => {
       throw e;
     }
 
-    const computedTotal = computedItemsPrice + shippingPrice - discountAmount;
+    const codExtraCharge = (paymentMode === 'COD' || !paymentMode) ? (rules.codExtraCharge || 0) : 0;
+    const computedTotal = computedItemsPrice + shippingPrice + codExtraCharge - discountAmount;
+
+    // COD maximum limit check
+    if ((paymentMode === 'COD' || !paymentMode) && rules.codMaxOrder && computedTotal > rules.codMaxOrder) {
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId).catch(() => {});
+      return res.status(400).json({
+        success: false,
+        message: `Cash on Delivery is only available for orders up to ₹${rules.codMaxOrder}. Please use Online Payment.`
+      });
+    }
 
     // ── Reserve stock atomically, before the order exists ─────────────────────
     // buildVerifiedItems only *checks* availability. Two customers racing for
@@ -148,8 +179,9 @@ exports.createOrder = async (req, res) => {
         itemsPrice: computedItemsPrice,
         shippingPrice,
         discountAmount,
+        codExtraCharge,
         couponUsed,
-        totalAmount: computedTotal,
+        totalAmount: Math.max(0, computedTotal),
         // Units were claimed above, so confirmation must not take them twice.
         stockDecremented: true,
         statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Order placed' }]
@@ -157,7 +189,11 @@ exports.createOrder = async (req, res) => {
     } catch (createErr) {
       // The coupon use was claimed before the order existed — hand it back so a
       // failed insert does not silently burn one of the customer's allowance.
-      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId).catch(() => {});
+      // Return reserved stock so inventory does not leak on database insertion error.
+      await stockService.restoreReservedStock(verifiedItems).catch((e) =>
+        console.error('⚠️  Failed to restore reserved stock on order create failure:', e.message)
+      );
       throw createErr;
     }
 
@@ -259,18 +295,68 @@ exports.getAllOrders = async (req, res) => {
     const limit  = Math.min(100, parseInt(req.query.limit) || 20);
     const skip   = (page - 1) * limit;
 
-    // Whitelist status values — never pass raw query objects into Mongoose
-    const VALID_STATUSES = ['Pending','Confirmed','Packed','Shipped','Delivered','Cancelled','CancellationRequested'];
-    const rawStatus = req.query.status;
-    const status = (typeof rawStatus === 'string' && VALID_STATUSES.includes(rawStatus)) ? rawStatus : null;
+    // Whitelist status values — support case-insensitivity & special filters
+    const VALID_STATUSES = ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Delivered', 'Cancelled', 'CancellationRequested'];
+    const rawStatus = (req.query.status || '').trim();
+    const rawPaymentStatus = (req.query.paymentStatus || '').trim();
+    const rawPeriod = (req.query.period || '').trim().toLowerCase();
+    const search = (req.query.search || '').trim();
 
-    // Real orders: COD (always real) OR Online/UPI where payment succeeded
-    const baseFilter = { $or: [
-      { paymentMode: 'COD' },
-      { paymentStatus: { $in: ['Paid', 'Refunded'] } }
-    ]};
+    let matchedStatus = null;
+    let isActionRequired = false;
+
+    if (rawStatus) {
+      if (rawStatus.toLowerCase() === 'action_required' || rawStatus.toLowerCase() === 'actionrequired') {
+        isActionRequired = true;
+      } else {
+        matchedStatus = VALID_STATUSES.find((s) => s.toLowerCase() === rawStatus.toLowerCase()) || null;
+      }
+    }
+
+    // Real orders: COD (always real) OR Online/UPI where payment succeeded (unless specifically filtering for Failed)
+    let baseFilter;
+    if (rawPaymentStatus.toLowerCase() === 'failed') {
+      baseFilter = { paymentStatus: 'Failed' };
+    } else {
+      baseFilter = {
+        $or: [
+          { paymentMode: 'COD' },
+          { paymentStatus: { $in: ['Paid', 'Refunded'] } }
+        ]
+      };
+    }
+
     const query = { ...baseFilter };
-    if (status) query.orderStatus = status;
+
+    if (isActionRequired) {
+      query.orderStatus = { $in: ['Pending', 'CancellationRequested'] };
+    } else if (matchedStatus) {
+      query.orderStatus = matchedStatus;
+    }
+
+    if (rawPaymentStatus && rawPaymentStatus.toLowerCase() !== 'failed') {
+      query.paymentStatus = rawPaymentStatus;
+    }
+
+    if (rawPeriod === 'today') {
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+      query.createdAt = { $gte: startOfToday };
+    }
+
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const searchRegex = new RegExp(escaped, 'i');
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { orderNumber: searchRegex },
+          { 'shippingAddress.name': searchRegex },
+          { 'shippingAddress.phone': searchRegex },
+          { 'shippingAddress.city': searchRegex },
+        ]
+      });
+    }
 
     const [orders, total] = await Promise.all([
       Order.find(query)
@@ -386,6 +472,30 @@ exports.cancelOrder = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
+    // ── Check store cancellation settings ────────────────────────────────────
+    const settings = await Settings.getSingleton().catch(() => null);
+    if (settings && !settings.orders.allowCustomerCancellation) {
+      return res.status(400).json({
+        success: false,
+        message: 'Online cancellation requests are currently disabled. Please contact customer support.'
+      });
+    }
+
+    const cutoff = settings?.orders?.cancellationAllowedUntil || 'Before Shipped';
+    if (cutoff === 'Before Packed' && ['Packed', 'Shipped', 'Delivered'].includes(order.orderStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order cancellation is only allowed before the order is packed.'
+      });
+    }
+
+    if (cutoff === 'Before Shipped' && ['Shipped', 'Delivered'].includes(order.orderStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order cancellation is not permitted once the order has been shipped.'
+      });
+    }
+
     if (['Delivered', 'Cancelled', 'CancellationRequested'].includes(order.orderStatus)) {
       return res.status(400).json({
         success: false,
@@ -433,8 +543,12 @@ exports.approveCancellation = async (req, res) => {
     const order = await Order.findOneAndUpdate(
       {
         _id:         req.params.id,
-        orderStatus: 'CancellationRequested',
-        'refund.refundStatus': { $exists: false }  // no refund attempt yet
+        orderStatus: { $in: ['CancellationRequested', 'Cancelled'] },
+        $or: [
+          { 'refund.refundStatus': { $exists: false } },
+          { 'refund.refundStatus': 'Failed' },
+          { 'refund.refundStatus': null }
+        ]
       },
       { $set: {
           orderStatus:              'Cancelled',
@@ -448,8 +562,10 @@ exports.approveCancellation = async (req, res) => {
     if (!order) {
       const existing = await Order.findById(req.params.id);
       if (!existing) return res.status(404).json({ success: false, message: 'Order not found' });
-      if (existing.orderStatus !== 'CancellationRequested')
+      if (!['CancellationRequested', 'Cancelled'].includes(existing.orderStatus))
         return res.status(400).json({ success: false, message: 'No pending cancellation request for this order.' });
+      if (existing.refund?.refundStatus === 'Processed')
+        return res.status(409).json({ success: false, message: 'Refund already processed for this order.' });
       return res.status(409).json({ success: false, message: 'Cancellation already in progress or refund already initiated.' });
     }
 

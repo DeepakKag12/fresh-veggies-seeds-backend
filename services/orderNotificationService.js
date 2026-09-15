@@ -16,6 +16,7 @@
 
 const nodemailer      = require('nodemailer');
 const whatsappService = require('../services/whatsappService');
+const Settings        = require('../models/Settings');
 
 const transporter = nodemailer.createTransport({
   host: process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com',
@@ -103,6 +104,11 @@ const addressBlock = (a) => `
 // ─── Customer: order placed ──────────────────────────────────────────────────
 
 exports.sendOrderConfirmation = async (order, user) => {
+  const settings = await Settings.getSingleton().catch(() => null);
+  if (settings && settings.notifications?.customer?.orderConfirmation?.email === false) {
+    return { success: true, message: 'Customer confirmation email disabled in settings' };
+  }
+
   const paid = order.paymentStatus === 'Paid';
   return send(
     user?.email,
@@ -121,28 +127,38 @@ exports.sendOrderConfirmation = async (order, user) => {
 // ─── Admin: new order arrived ────────────────────────────────────────────────
 
 exports.notifyAdminNewOrder = async (order, user) => {
-  const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.BREVO_FROM_EMAIL;
+  const settings = await Settings.getSingleton().catch(() => null);
+  const emailEnabled = settings ? settings.notifications?.admin?.newOrder?.email !== false : true;
+  const whatsappEnabled = settings ? settings.notifications?.admin?.newOrder?.whatsapp !== false : true;
 
-  const results = await Promise.allSettled([
-    send(
-      adminEmail,
-      `🛒 New order ${order.orderNumber} — ${money(order.totalAmount)}`,
-      layout(`New order received`, `
-        <p style="font-size:14px"><strong>${order.orderNumber}</strong> · ${order.paymentMode === 'COD' ? 'Cash on Delivery' : 'Paid online'}</p>
-        <h3 style="font-size:15px;margin:20px 0 4px">Customer</h3>
-        <p style="font-size:14px;margin:4px 0">${user?.name || '—'}<br>📞 ${user?.phone || '—'}<br>✉️ ${user?.email || '—'}</p>
-        ${itemsTable(order)}
-        <h3 style="font-size:15px;margin:20px 0 4px">Ship to</h3>
-        ${addressBlock(order.shippingAddress)}
-      `)
-    ),
-    // Already-built WhatsApp alert — it just was never wired up until now.
-    whatsappService.sendNewOrderNotification(order, user || {})
-  ]);
+  const promises = [];
 
+  if (emailEnabled) {
+    const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.sendOrdermailtoadmin || process.env.BREVO_FROM_EMAIL;
+    promises.push(
+      send(
+        adminEmail,
+        `🛒 New order ${order.orderNumber} — ${money(order.totalAmount)}`,
+        layout(`New order received`, `
+          <p style="font-size:14px"><strong>${order.orderNumber}</strong> · ${order.paymentMode === 'COD' ? 'Cash on Delivery' : 'Paid online'}</p>
+          <h3 style="font-size:15px;margin:20px 0 4px">Customer</h3>
+          <p style="font-size:14px;margin:4px 0">${user?.name || '—'}<br>📞 ${user?.phone || '—'}<br>✉️ ${user?.email || '—'}</p>
+          ${itemsTable(order)}
+          <h3 style="font-size:15px;margin:20px 0 4px">Ship to</h3>
+          ${addressBlock(order.shippingAddress)}
+        `)
+      )
+    );
+  }
+
+  if (whatsappEnabled) {
+    promises.push(whatsappService.sendNewOrderNotification(order, user || {}));
+  }
+
+  const results = await Promise.allSettled(promises);
   results.forEach((r, i) => {
     if (r.status === 'rejected') {
-      console.error(`⚠️  Admin new-order notification ${i === 0 ? 'email' : 'WhatsApp'} failed:`, r.reason?.message);
+      console.error(`⚠️  Admin new-order notification failed:`, r.reason?.message);
     }
   });
 };
