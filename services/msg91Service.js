@@ -187,7 +187,9 @@ const sendOtp = async (phone) => {
 
   // Send OTP via MSG91 direct API
   try {
-    const url = `https://control.msg91.com/api/v5/otp?mobile=91${cleanPhone}&authkey=${authKey}&otp=${generatedOtp}&otp_length=4&otp_expiry=10`;
+    const templateId = process.env.MSG91_TEMPLATE_ID;
+    const templateParam = templateId ? `&template_id=${templateId}` : '';
+    const url = `https://control.msg91.com/api/v5/otp?mobile=91${cleanPhone}&authkey=${authKey}&otp=${generatedOtp}&otp_length=4&otp_expiry=10${templateParam}`;
     const response = await axios.post(
       url,
       {},
