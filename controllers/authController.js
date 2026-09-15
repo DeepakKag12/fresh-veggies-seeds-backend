@@ -800,7 +800,7 @@ exports.verifyOTP = async (req, res) => {
 // @access  Public
 exports.verifyMsg91Token = async (req, res) => {
   try {
-    const { accessToken, name } = req.body;
+    const { accessToken, name, phone } = req.body;
 
     if (!accessToken) {
       return res.status(400).json({
@@ -810,7 +810,7 @@ exports.verifyMsg91Token = async (req, res) => {
     }
 
     // ── Verify token with MSG91 server-side ──────────────────────────────
-    const verification = await msg91Service.verifyAccessToken(accessToken);
+    const verification = await msg91Service.verifyAccessToken(accessToken, phone);
     if (!verification.success) {
       return res.status(400).json({
         success: false,

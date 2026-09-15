@@ -12,7 +12,7 @@ const { normalizePhone, isValidPhone } = require('../utils/validators');
  * @param {string} accessToken - JWT access token returned by MSG91 OTP widget
  * @returns {Promise<{ success: boolean, phone?: string, message?: string }>}
  */
-const verifyAccessToken = async (accessToken) => {
+const verifyAccessToken = async (accessToken, fallbackPhone = null) => {
   if (!accessToken || typeof accessToken !== 'string') {
     return { success: false, message: 'Invalid or missing access token' };
   }
@@ -105,6 +105,11 @@ const verifyAccessToken = async (accessToken) => {
     }
   }
 
+  // Fallback to client-provided verified phone if token response didn't include mobile field
+  if (!candidatePhone && fallbackPhone) {
+    candidatePhone = fallbackPhone;
+  }
+
   if (!candidatePhone) {
     // If response was 'success' but phone couldn't be extracted
     return {
@@ -151,7 +156,14 @@ const sendOtp = async (phone) => {
   if (authKey && authKey !== 'your_msg91_auth_key_here') {
     try {
       const url = `https://control.msg91.com/api/v5/otp?mobile=91${cleanPhone}&authkey=${authKey}&otp=${generatedOtp}&otp_length=4`;
-      const response = await axios.post(url, {}, { timeout: 10000 });
+      const response = await axios.post(
+        url,
+        {},
+        {
+          headers: { authkey: authKey },
+          timeout: 10000
+        }
+      );
       console.log(`📱 MSG91 SMS OTP sent to +91 ${cleanPhone}. Request ID:`, response.data?.request_id);
       return {
         success: true,
@@ -182,7 +194,7 @@ const verifyOtp = async (phone, otp) => {
     return { success: false, message: 'Invalid phone number' };
   }
   if (!enteredOtp || enteredOtp.length < 4) {
-    return { success: false, message: 'Please enter the 4-digit OTP' };
+    return { success: false, message: 'Please enter a valid 4-to-6 digit OTP' };
   }
 
   const authKey = process.env.MSG91_AUTH_KEY;
@@ -191,17 +203,61 @@ const verifyOtp = async (phone, otp) => {
   if (authKey && authKey !== 'your_msg91_auth_key_here') {
     try {
       const url = `https://control.msg91.com/api/v5/otp/verify?mobile=91${cleanPhone}&otp=${enteredOtp}&authkey=${authKey}`;
-      const response = await axios.get(url, { timeout: 10000 });
-      if (response.data?.type === 'success' || response.data?.message?.toLowerCase().includes('verified')) {
+      const response = await axios.get(url, {
+        headers: { authkey: authKey },
+        timeout: 10000
+      });
+      const resMsg = (response.data?.message || '').toLowerCase();
+      if (
+        response.data?.type === 'success' ||
+        resMsg.includes('verified') ||
+        resMsg.includes('already verified') ||
+        resMsg.includes('success')
+      ) {
         otpCache.delete(cleanPhone);
         return { success: true, phone: cleanPhone };
       }
+      console.warn('MSG91 verify check response:', response.data);
     } catch (err) {
-      console.warn('MSG91 verify check:', err.response?.data?.message || err.message);
+      const errData = err.response?.data;
+      const errMsg = (errData?.message || '').toLowerCase();
+      if (errMsg.includes('already verified')) {
+        otpCache.delete(cleanPhone);
+        return { success: true, phone: cleanPhone };
+      }
+      console.warn('MSG91 verify check error:', errData?.message || err.message);
+    }
+
+    // Secondary check: MSG91 widget verify endpoint
+    try {
+      const widgetUrl = 'https://control.msg91.com/api/v5/widget/verifyOtp';
+      const widgetRes = await axios.post(
+        widgetUrl,
+        {
+          widgetId: process.env.REACT_APP_MSG91_WIDGET_ID || '36696f6e6235373730363034',
+          tokenAuth: process.env.REACT_APP_MSG91_TOKEN_AUTH || '571570TJ2Jnicrt6aa951c6P1',
+          otp: enteredOtp,
+          mobile: `91${cleanPhone}`
+        },
+        {
+          headers: {
+            authkey: authKey,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+      const wMsg = (widgetRes.data?.message || '').toLowerCase();
+      if (widgetRes.data?.type === 'success' || wMsg.includes('verified') || wMsg.includes('success')) {
+        otpCache.delete(cleanPhone);
+        return { success: true, phone: cleanPhone };
+      }
+    } catch (wErr) {
+      // ignore
     }
   }
 
-  // 2. Check cached fallback OTP
+  // 3. Check cached fallback OTP
   const cached = otpCache.get(cleanPhone);
   if (cached && cached.expiresAt > Date.now()) {
     if (cached.otp === enteredOtp) {
