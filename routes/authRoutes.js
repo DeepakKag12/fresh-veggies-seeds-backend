@@ -15,17 +15,30 @@ const {
   getCart,
   updateCart,
   verifyEmail,
+  verifyMsg91Token,
   addAddress,
   updateAddress,
   deleteAddress,
   setDefaultAddress
 } = require('../controllers/authController');
 const { protect } = require('../middleware/auth');
+const rateLimit = require('express-rate-limit');
+
+const msg91Limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // limit each IP to 30 requests per 15 min
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many OTP verification requests, please try again later.' }
+});
 
 // Authentication routes
 router.post('/register', register);
 router.post('/login', login);
 router.get('/verify-email/:token', verifyEmail);
+
+// MSG91 SMS OTP verification route
+router.post('/msg91/verify-token', msg91Limiter, verifyMsg91Token);
 
 // Password recovery routes
 router.post('/forgot-password', forgotPassword);

@@ -2,6 +2,7 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const emailService = require('../services/emailService');
+const msg91Service = require('../services/msg91Service');
 const { isValidEmail, isValidPhone, validatePassword, validateCart, cleanText } = require('../utils/validators');
 // Email verification is opt-in. It is off by default so a store can run without
 // SMTP configured; set REQUIRE_EMAIL_VERIFICATION=true to enforce it.
@@ -791,6 +792,94 @@ exports.verifyOTP = async (req, res) => {
     });
   } catch (error) {
     return serverError(res, error, 'authController.js → verifyOTP');
+  }
+};
+
+// @desc    Verify MSG91 OTP Widget Access Token and Authenticate / Register Customer
+// @route   POST /api/auth/msg91/verify-token
+// @access  Public
+exports.verifyMsg91Token = async (req, res) => {
+  try {
+    const { accessToken, name } = req.body;
+
+    if (!accessToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Access token from MSG91 OTP widget is required'
+      });
+    }
+
+    // ── Verify token with MSG91 server-side ──────────────────────────────
+    const verification = await msg91Service.verifyAccessToken(accessToken);
+    if (!verification.success) {
+      return res.status(400).json({
+        success: false,
+        message: verification.message || 'OTP verification failed'
+      });
+    }
+
+    const verifiedPhone = verification.phone;
+
+    // ── Find or Create Customer ──────────────────────────────────────────
+    let user = await User.findOne({ phone: verifiedPhone });
+    let isNewUser = false;
+
+    if (user) {
+      // Existing customer
+      if (!user.isActive) {
+        return res.status(403).json({
+          success: false,
+          message: 'Account has been deactivated. Please contact support.'
+        });
+      }
+
+      if (user.isLocked && user.lockedUntil && user.lockedUntil > Date.now()) {
+        const minutesLeft = Math.ceil((user.lockedUntil - Date.now()) / (1000 * 60));
+        return res.status(429).json({
+          success: false,
+          message: `Account is locked. Please try again in ${minutesLeft} minutes.`
+        });
+      }
+
+      // Reset login attempts on verified OTP
+      user.loginAttempts = 0;
+      user.isLocked = false;
+      user.lockedUntil = undefined;
+      user.lastLogin = new Date();
+      await user.save({ validateBeforeSave: false });
+    } else {
+      // New customer — minimum required record, no forced password
+      isNewUser = true;
+      const cleanCustomerName = cleanText(name || `Customer ${verifiedPhone.slice(-4)}`, 100);
+      user = await User.create({
+        name: cleanCustomerName,
+        phone: verifiedPhone,
+        role: 'customer',
+        isActive: true,
+        emailVerified: false,
+        addresses: []
+      });
+    }
+
+    const token = generateToken(user);
+
+    return res.status(200).json({
+      success: true,
+      message: isNewUser ? 'Welcome to Fresh Veggies!' : 'Welcome back!',
+      isNewUser,
+      data: {
+        _id: user._id,
+        name: user.name,
+        email: user.email || '',
+        phone: user.phone,
+        role: user.role,
+        address: user.address,
+        addresses: user.addresses || [],
+        token
+      }
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → verifyMsg91Token');
   }
 };
 

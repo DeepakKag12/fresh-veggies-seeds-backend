@@ -1,4 +1,5 @@
 const Category = require('../models/Category');
+const cacheService = require('../utils/cacheService');
 const { serverError } = require('../utils/respond');
 
 // @desc    Get all categories
@@ -6,6 +7,11 @@ const { serverError } = require('../utils/respond');
 // @access  Public
 exports.getCategories = async (req, res) => {
   try {
+    const cached = cacheService.get('categories:all');
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
     const categories = await Category.find({ isActive: true })
       .populate('parentCategory', 'name slug')
       .sort({ name: 1 }) // Sort alphabetically by name
@@ -31,11 +37,16 @@ exports.getCategories = async (req, res) => {
       return 0;
     });
 
-    res.status(200).json({
+    const payload = {
       success: true,
       count: sortedCategories.length,
       data: sortedCategories
-    });
+    };
+
+    // Cache categories in memory for 5 minutes (auto-invalidated on admin mutations)
+    cacheService.set('categories:all', payload, 5 * 60 * 1000);
+
+    res.status(200).json(payload);
   } catch (error) {
     return serverError(res, error, 'categoryController.js → getCategories');
   }
@@ -73,6 +84,9 @@ exports.createCategory = async (req, res) => {
   try {
     const category = await Category.create(req.body);
 
+    cacheService.invalidate('categories:');
+    cacheService.invalidate('products:');
+
     res.status(201).json({
       success: true,
       data: category
@@ -100,6 +114,9 @@ exports.updateCategory = async (req, res) => {
       });
     }
 
+    cacheService.invalidate('categories:');
+    cacheService.invalidate('products:');
+
     res.status(200).json({
       success: true,
       data: category
@@ -122,6 +139,9 @@ exports.deleteCategory = async (req, res) => {
         message: 'Category not found'
       });
     }
+
+    cacheService.invalidate('categories:');
+    cacheService.invalidate('products:');
 
     res.status(200).json({
       success: true,

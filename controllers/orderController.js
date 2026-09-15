@@ -62,6 +62,20 @@ const saveAddressToUser = async (userId, shippingAddress) => {
       };
     }
 
+    // Update user name if currently default
+    if (shippingAddress.name && (!user.name || user.name.startsWith('Customer '))) {
+      user.name = shippingAddress.name;
+    }
+
+    // Save optional email if not yet set on profile and not already registered to another user
+    if (shippingAddress.email && !user.email) {
+      const emailCandidate = shippingAddress.email.trim().toLowerCase();
+      const existingUserWithEmail = await User.findOne({ email: emailCandidate, _id: { $ne: user._id } });
+      if (!existingUserWithEmail) {
+        user.email = emailCandidate;
+      }
+    }
+
     await user.save({ validateBeforeSave: false });
   } catch (err) {
     console.error('Error saving address to user profile:', err.message);
@@ -186,6 +200,9 @@ exports.createOrder = async (req, res) => {
         stockDecremented: true,
         statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Order placed' }]
       });
+
+      // Invalidate admin stats cache so dashboard reflects new order immediately
+      statsCache.invalidate('admin:');
     } catch (createErr) {
       // The coupon use was claimed before the order existed — hand it back so a
       // failed insert does not silently burn one of the customer's allowance.
@@ -260,7 +277,8 @@ exports.getMyOrders = async (req, res) => {
 exports.getOrder = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id)
-      .populate('userId', 'name email phone');
+      .populate('userId', 'name email phone')
+      .lean();
 
     if (!order) {
       return res.status(404).json({
@@ -270,7 +288,8 @@ exports.getOrder = async (req, res) => {
     }
 
     // Check if order belongs to user or user is admin
-    if (order.userId._id.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+    const orderUserId = order.userId?._id ? order.userId._id.toString() : (order.userId?.toString() || '');
+    if (orderUserId !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to view this order'
@@ -363,7 +382,8 @@ exports.getAllOrders = async (req, res) => {
         .populate('userId', 'name email phone')
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(limit),
+        .limit(limit)
+        .lean(),
       Order.countDocuments(query)
     ]);
 
@@ -456,9 +476,10 @@ exports.updateOrderStatus = async (req, res) => {
       order.cancellationRequest.rejectionReason = note || `Status updated to ${orderStatus} by admin`;
     }
 
-    statsCache.invalidate('admin:');
+    // statsCache.invalidate('admin:'); // moved
 
     await order.save();
+    statsCache.invalidate('admin:');
 
     // ── Inventory Side Effects ───────────────────────────────────────────────
     // If moving to any status where stock should be committed (and not already committed):
@@ -558,11 +579,19 @@ exports.cancelOrder = async (req, res) => {
 
     await order.save();
 
+    // Notify the admin that a cancellation request has arrived (fire-and-forget).
+    const customer = await User.findById(order.userId).select('name email phone');
+    notify.notifyAdminCancellationRequest(order, customer).catch((err) =>
+      console.error('⚠️  Cancellation-request admin notification failed:', err.message)
+    );
+
     res.status(200).json({
       success: true,
       data: order,
       message: 'Cancellation request submitted. Admin will review and process it shortly.'
     });
+    // Invalidate admin stats cache due to order status change (cancellation request)
+    statsCache.invalidate('admin:');
   } catch (error) {
     return serverError(res, error, 'orderController.js → cancelOrder');
   }
@@ -690,6 +719,8 @@ exports.approveCancellation = async (req, res) => {
       data:    finalOrder,
       message: `Cancellation approved.${refundMsg}`
     });
+    // Invalidate admin stats cache after cancellation approval
+    statsCache.invalidate('admin:');
   } catch (error) {
     return serverError(res, error, 'orderController.js → approveCancellation');
   }
@@ -724,8 +755,16 @@ exports.rejectCancellation = async (req, res) => {
       changedBy: req.user._id,
       note:      order.cancellationRequest.rejectionReason
     });
+    // Invalidate admin stats cache after rejection of cancellation request
+    statsCache.invalidate('admin:');
 
     await order.save();
+
+    // Notify customer that cancellation request was rejected (fire-and-forget)
+    const customer = await User.findById(order.userId).select('name email phone');
+    notify.sendCancellationRejected(order, customer, order.cancellationRequest.rejectionReason).catch((err) =>
+      console.error('⚠️  Cancellation rejection notification failed:', err.message)
+    );
 
     res.status(200).json({
       success: true,

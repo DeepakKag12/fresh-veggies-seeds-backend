@@ -31,30 +31,25 @@ exports.getDashboardStats = async (req, res) => {
     // Real orders = COD (always real) OR Online/UPI with payment confirmed/refunded
     const realOrder = { $or: [{ paymentMode: 'COD' }, { paymentStatus: { $in: ['Paid', 'Refunded'] } }] };
 
-    // ── Run all queries in parallel ───────────────────────────────────────────
+    // ── Run all queries concurrently using consolidated aggregations ─────────
     const [
       totalOrders, totalUsers, totalProducts,
-      pendingOrders, confirmedOrders, packedOrders, shippedOrders,
-      deliveredOrders, cancelledOrders, cancellationRequests,
+      statusAgg,
       failedPayments, lowStockProducts, outOfStockProducts, pendingReviews,
       todayOrders, todayUsers,
       urgentOrders,
-      revAll, revOnline, revCOD, revRefunded,
-      revToday, revTodayOnline, revTodayCOD,
-      revMonth, revLastMonth,
-      revMonthOnline, revMonthCOD
+      revAggList
     ] = await Promise.all([
       Order.countDocuments(realOrder),
       User.countDocuments({ role: 'customer' }),
       Product.countDocuments(),
 
-      Order.countDocuments({ ...realOrder, orderStatus: 'Pending'               }),
-      Order.countDocuments({ ...realOrder, orderStatus: 'Confirmed'             }),
-      Order.countDocuments({ ...realOrder, orderStatus: 'Packed'                }),
-      Order.countDocuments({ ...realOrder, orderStatus: 'Shipped'               }),
-      Order.countDocuments({ ...realOrder, orderStatus: 'Delivered'             }),
-      Order.countDocuments({ ...realOrder, orderStatus: 'Cancelled'             }),
-      Order.countDocuments({ ...realOrder, orderStatus: 'CancellationRequested' }),
+      // Single aggregation to get counts for all statuses in 1 query
+      Order.aggregate([
+        { $match: realOrder },
+        { $group: { _id: '$orderStatus', count: { $sum: 1 } } }
+      ]),
+
       Order.countDocuments({ paymentStatus: 'Failed' }),
       Product.countDocuments({ stock: { $gt: 0, $lte: lowStockCutoff } }),
       Product.countDocuments({ stock: { $lte: 0 } }),
@@ -69,36 +64,68 @@ exports.getDashboardStats = async (req, res) => {
         .limit(10)
         .lean(),
 
-      // ── Revenue: only Paid orders ─────────────────────────────────────────
-      Order.aggregate([{ $match: { paymentStatus: 'Paid' } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', paymentMode: 'Online' } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', paymentMode: 'COD' } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Refunded' } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-
-      // ── Today revenue ─────────────────────────────────────────────────────
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', createdAt: { $gte: today } } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', paymentMode: 'Online', createdAt: { $gte: today } } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', paymentMode: 'COD', createdAt: { $gte: today } } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-
-      // ── This month revenue ────────────────────────────────────────────────
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', createdAt: { $gte: monthStart } } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', paymentMode: 'Online', createdAt: { $gte: monthStart } } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
-      Order.aggregate([{ $match: { paymentStatus: 'Paid', paymentMode: 'COD', createdAt: { $gte: monthStart } } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } }]),
+      // Consolidated single aggregation for all revenue figures
+      Order.aggregate([
+        { $match: { paymentStatus: { $in: ['Paid', 'Refunded'] } } },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: {
+              $sum: { $cond: [{ $eq: ['$paymentStatus', 'Paid'] }, '$totalAmount', 0] }
+            },
+            onlineRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'Online'] }] }, '$totalAmount', 0] }
+            },
+            codRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'COD'] }] }, '$totalAmount', 0] }
+            },
+            refundedAmount: {
+              $sum: { $cond: [{ $eq: ['$paymentStatus', 'Refunded'] }, '$totalAmount', 0] }
+            },
+            todayRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $gte: ['$createdAt', today] }] }, '$totalAmount', 0] }
+            },
+            todayOnlineRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'Online'] }, { $gte: ['$createdAt', today] }] }, '$totalAmount', 0] }
+            },
+            todayCODRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'COD'] }, { $gte: ['$createdAt', today] }] }, '$totalAmount', 0] }
+            },
+            monthRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $gte: ['$createdAt', monthStart] }] }, '$totalAmount', 0] }
+            },
+            lastMonthRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $gte: ['$createdAt', lastMonthStart] }, { $lte: ['$createdAt', lastMonthEnd] }] }, '$totalAmount', 0] }
+            },
+            monthOnlineRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'Online'] }, { $gte: ['$createdAt', monthStart] }] }, '$totalAmount', 0] }
+            },
+            monthCODRevenue: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'COD'] }, { $gte: ['$createdAt', monthStart] }] }, '$totalAmount', 0] }
+            },
+          }
+        }
+      ]),
     ]);
 
-    const g = (agg) => (agg.length > 0 ? agg[0].total : 0);
+    // Map status counts from single aggregation
+    const statusMap = {};
+    if (Array.isArray(statusAgg)) {
+      statusAgg.forEach((s) => {
+        if (s._id) statusMap[s._id] = s.count;
+      });
+    }
+
+    const pendingOrders        = statusMap['Pending'] || 0;
+    const confirmedOrders      = statusMap['Confirmed'] || 0;
+    const packedOrders         = statusMap['Packed'] || 0;
+    const shippedOrders        = statusMap['Shipped'] || 0;
+    const deliveredOrders      = statusMap['Delivered'] || 0;
+    const cancelledOrders      = statusMap['Cancelled'] || 0;
+    const cancellationRequests = statusMap['CancellationRequested'] || 0;
+
+    // Extract revenue from consolidated aggregation
+    const rev = (revAggList && revAggList.length > 0) ? revAggList[0] : {};
 
     const payload = {
       success: true,
@@ -112,19 +139,19 @@ exports.getDashboardStats = async (req, res) => {
         actionRequiredCount: pendingOrders + cancellationRequests,
         urgentOrders,
         // Revenue (only from paid orders)
-        totalRevenue:       g(revAll),
-        onlineRevenue:      g(revOnline),
-        codRevenue:         g(revCOD),
-        refundedAmount:     g(revRefunded),
+        totalRevenue:       rev.totalRevenue || 0,
+        onlineRevenue:      rev.onlineRevenue || 0,
+        codRevenue:         rev.codRevenue || 0,
+        refundedAmount:     rev.refundedAmount || 0,
         // Today
-        todayRevenue:       g(revToday),
-        todayOnlineRevenue: g(revTodayOnline),
-        todayCODRevenue:    g(revTodayCOD),
+        todayRevenue:       rev.todayRevenue || 0,
+        todayOnlineRevenue: rev.todayOnlineRevenue || 0,
+        todayCODRevenue:    rev.todayCODRevenue || 0,
         // This month
-        monthRevenue:       g(revMonth),
-        lastMonthRevenue:   g(revLastMonth),
-        monthOnlineRevenue: g(revMonthOnline),
-        monthCODRevenue:    g(revMonthCOD),
+        monthRevenue:       rev.monthRevenue || 0,
+        lastMonthRevenue:   rev.lastMonthRevenue || 0,
+        monthOnlineRevenue: rev.monthOnlineRevenue || 0,
+        monthCODRevenue:    rev.monthCODRevenue || 0,
       }
     };
 

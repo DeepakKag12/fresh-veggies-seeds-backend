@@ -10,7 +10,8 @@ exports.getAllCoupons = async (req, res) => {
     const coupons = await Coupon.find()
       .populate('applicableCategories', 'name')
       .populate('applicableProducts', 'name')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     res.status(200).json({
       success: true,
@@ -29,10 +30,12 @@ exports.getActiveCoupons = async (req, res) => {
   try {
     const now = new Date();
     const coupons = await Coupon.find({
-      isActive: true,
-      startDate: { $lte: now },
-      expiryDate: { $gte: now }
-    }).select('code description discountType discountValue minOrderAmount');
+        isActive: true,
+        startDate: { $lte: now },
+        expiryDate: { $gte: now }
+      })
+        .select('code description discountType discountValue minOrderAmount')
+        .lean();
 
     res.status(200).json({
       success: true,
@@ -53,7 +56,7 @@ exports.validateCoupon = async (req, res) => {
 
     // Delegates to couponService so this preview and the discount actually
     // applied at checkout can never disagree — they run the same code.
-    const result = await couponService.validateCoupon(code, Number(orderAmount) || 0, req.user._id);
+    const result = await couponService.validateCoupon(code, Number(orderAmount) || 0, req.user?._id || null);
 
     if (!result.valid) {
       return res.status(400).json({ success: false, message: result.message });

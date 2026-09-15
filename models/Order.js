@@ -49,6 +49,7 @@ const orderSchema = new mongoose.Schema({
   shippingAddress: {
     name: { type: String, required: true },
     phone: { type: String, required: true },
+    email: { type: String, trim: true, lowercase: true },
     street: { type: String, required: true },
     city: { type: String, required: true },
     state: { type: String, required: true },
@@ -209,6 +210,9 @@ orderSchema.pre('validate', async function (next) {
 // by status, and the payment lookups done by verify + webhook.
 orderSchema.index({ userId: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1, createdAt: -1 });
+orderSchema.index({ orderStatus: 1, paymentMode: 1, createdAt: -1 });
+orderSchema.index({ paymentStatus: 1, createdAt: -1 });
+orderSchema.index({ createdAt: -1 });
 orderSchema.index({ 'paymentDetails.razorpayOrderId': 1 });
 orderSchema.index({ 'paymentDetails.razorpayPaymentId': 1 });
 orderSchema.index({ paymentMode: 1, paymentStatus: 1, createdAt: -1 });

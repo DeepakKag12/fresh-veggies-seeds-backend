@@ -54,6 +54,10 @@ exports.getAllReviews = async (req, res) => {
 // @access  Public
 exports.getProductReviews = async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.productId)) {
+      return res.status(400).json({ success: false, message: 'Invalid product id.' });
+    }
+
     const page  = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const filter = { productId: req.params.productId, isApproved: true };

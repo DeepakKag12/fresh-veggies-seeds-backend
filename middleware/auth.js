@@ -58,3 +58,29 @@ exports.admin = (req, res, next) => {
     res.status(403).json({ success: false, message: 'Access denied. Admin only.' });
   }
 };
+
+// Optional auth - populates req.user if token is present and valid, does not block guests
+exports.optionalAuth = async (req, res, next) => {
+  try {
+    let token;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
+    }
+    if (!token) return next();
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch {
+      return next();
+    }
+
+    const user = await User.findById(decoded.id).select('-password');
+    if (user && user.isActive && (decoded.tv ?? 0) === (user.tokenVersion || 0)) {
+      req.user = user;
+    }
+    next();
+  } catch {
+    next();
+  }
+};

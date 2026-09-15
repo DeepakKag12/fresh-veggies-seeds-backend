@@ -15,9 +15,10 @@ const userSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    required: [true, 'Please provide email'],
     unique: true,
-    lowercase: true
+    sparse: true,
+    lowercase: true,
+    trim: true
   },
   emailVerified: {
     type: Boolean,
@@ -27,7 +28,6 @@ const userSchema = new mongoose.Schema({
   emailVerificationExpires: Date,
   password: {
     type: String,
-    required: [true, 'Please provide password'],
     minlength: 6,
     select: false
   },
@@ -128,6 +128,7 @@ userSchema.pre('save', async function(next) {
 
 // Compare password method
 userSchema.methods.comparePassword = async function(candidatePassword) {
+  if (!this.password) return false;
   return await bcrypt.compare(candidatePassword, this.password);
 };
 

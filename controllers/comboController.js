@@ -1,4 +1,5 @@
 const Combo = require('../models/Combo');
+const cacheService = require('../utils/cacheService');
 const { serverError } = require('../utils/respond');
 
 // @desc    Get all combos
@@ -6,16 +7,25 @@ const { serverError } = require('../utils/respond');
 // @access  Public
 exports.getCombos = async (req, res) => {
   try {
+    const cached = cacheService.get('combos:all');
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
     const combos = await Combo.find({ isActive: true })
       .populate('includedProducts.productId', 'name price images')
       .sort({ createdAt: -1 })
       .lean();
 
-    res.status(200).json({
+    const payload = {
       success: true,
       count: combos.length,
       data: combos
-    });
+    };
+
+    cacheService.set('combos:all', payload, 2 * 60 * 1000); // 2 min TTL
+
+    res.status(200).json(payload);
   } catch (error) {
     return serverError(res, error, 'comboController.js → getCombos');
   }
@@ -26,6 +36,12 @@ exports.getCombos = async (req, res) => {
 // @access  Public
 exports.getCombo = async (req, res) => {
   try {
+    const cacheKey = `combos:${req.params.id}`;
+    const cached = cacheService.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
     const combo = await Combo.findById(req.params.id)
       .populate('includedProducts.productId', 'name price images description')
       .lean();
@@ -37,10 +53,14 @@ exports.getCombo = async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    const payload = {
       success: true,
       data: combo
-    });
+    };
+
+    cacheService.set(cacheKey, payload, 2 * 60 * 1000);
+
+    res.status(200).json(payload);
   } catch (error) {
     return serverError(res, error, 'comboController.js → getCombo');
   }
@@ -52,6 +72,8 @@ exports.getCombo = async (req, res) => {
 exports.createCombo = async (req, res) => {
   try {
     const combo = await Combo.create(req.body);
+
+    cacheService.invalidate('combos:');
 
     res.status(201).json({
       success: true,
@@ -80,6 +102,8 @@ exports.updateCombo = async (req, res) => {
       });
     }
 
+    cacheService.invalidate('combos:');
+
     res.status(200).json({
       success: true,
       data: combo
@@ -102,6 +126,8 @@ exports.deleteCombo = async (req, res) => {
         message: 'Combo not found'
       });
     }
+
+    cacheService.invalidate('combos:');
 
     res.status(200).json({
       success: true,

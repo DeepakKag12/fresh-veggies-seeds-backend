@@ -8,11 +8,11 @@ const {
   updateCoupon,
   deleteCoupon
 } = require('../controllers/couponController');
-const { protect, admin } = require('../middleware/auth');
+const { protect, admin, optionalAuth } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 
 router.get('/active', getActiveCoupons);
-router.post('/validate', protect, validateCoupon);
+router.post('/validate', optionalAuth, validateCoupon);
 
 router.route('/')
   .get(protect, admin, getAllCoupons)

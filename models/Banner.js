@@ -57,6 +57,8 @@ const bannerSchema = new mongoose.Schema({
 
 // Index for faster queries
 bannerSchema.index({ isActive: 1, position: 1, order: 1 });
+bannerSchema.index({ isActive: 1, startDate: 1, order: 1 });
+bannerSchema.index({ position: 1, order: 1 });
 bannerSchema.index({ startDate: 1, endDate: 1 });
 
 module.exports = mongoose.model('Banner', bannerSchema);

@@ -51,6 +51,20 @@ const saveAddressToUser = async (userId, shippingAddress) => {
       };
     }
 
+    // Update user name if currently default
+    if (shippingAddress.name && (!user.name || user.name.startsWith('Customer '))) {
+      user.name = shippingAddress.name;
+    }
+
+    // Save optional email if not yet set on profile and not already registered to another user
+    if (shippingAddress.email && !user.email) {
+      const emailCandidate = shippingAddress.email.trim().toLowerCase();
+      const existingUserWithEmail = await User.findOne({ email: emailCandidate, _id: { $ne: user._id } });
+      if (!existingUserWithEmail) {
+        user.email = emailCandidate;
+      }
+    }
+
     await user.save({ validateBeforeSave: false });
   } catch (err) {
     console.error('Error saving address to user profile:', err.message);

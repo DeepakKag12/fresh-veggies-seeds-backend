@@ -122,12 +122,15 @@ productSchema.pre('save', function (next) {
 // catalogue on every cache miss.
 productSchema.index({ isActive: 1, createdAt: -1 });               // default + "newest" sort
 productSchema.index({ isActive: 1, categoryId: 1, createdAt: -1 });// category filter
+productSchema.index({ isActive: 1, categoryId: 1, price: 1 });     // category + price sort
+productSchema.index({ isActive: 1, season: 1, createdAt: -1 });    // seasonal filter
 productSchema.index({ isActive: 1, price: 1 });                    // price-low / price-high sorts
+productSchema.index({ isActive: 1, discount: -1 });                 // discounted/deals sort
 productSchema.index({ isActive: 1, rating: -1 });                  // GET /products/featured
 // Search scans name/description/features. Without this the regex $or was a
 // full collection scan on every keystroke-driven search request.
 productSchema.index({ name: 'text', description: 'text', features: 'text' });
 productSchema.index({ isActive: 1, featured: 1, createdAt: -1 });  // homepage "most loved"
-productSchema.index({ isActive: 1, stock: 1 });                    // low-stock admin view                  // GET /products/featured
+productSchema.index({ isActive: 1, stock: 1 });                    // low-stock admin view
 
 module.exports = mongoose.model('Product', productSchema);

@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const Product = require('../models/Product');
-const statsCache = require('../utils/statsCache');
+const cacheService = require('../utils/cacheService');
 const { serverError } = require('../utils/respond');
 
 // Helper to ensure returned product stock reflects package variants when present
@@ -121,6 +121,12 @@ exports.getProduct = async (req, res) => {
       });
     }
 
+    const cacheKey = `products:id:${req.params.id}`;
+    const cached = cacheService.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
     const product = await Product.findById(req.params.id)
       .populate('categoryId', 'name slug')
       .lean();
@@ -132,10 +138,14 @@ exports.getProduct = async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    const payload = {
       success: true,
       data: enrichProductStock(product)
-    });
+    };
+
+    cacheService.set(cacheKey, payload, 60 * 1000); // 60s fast memory cache
+
+    res.status(200).json(payload);
   } catch (error) {
     return serverError(res, error, 'productController → getProduct', 'Failed to fetch product.');
   }
@@ -151,7 +161,10 @@ exports.createProduct = async (req, res) => {
     }
     const product = await Product.create(req.body);
 
-    statsCache.invalidate('admin:');
+    cacheService.invalidate('products:');
+    cacheService.invalidate('combos:');
+    cacheService.invalidate('admin:');
+
     res.status(201).json({
       success: true,
       data: product
@@ -182,6 +195,10 @@ exports.updateProduct = async (req, res) => {
       });
     }
 
+    cacheService.invalidate('products:');
+    cacheService.invalidate('combos:');
+    cacheService.invalidate('admin:');
+
     res.status(200).json({
       success: true,
       data: product
@@ -205,6 +222,10 @@ exports.deleteProduct = async (req, res) => {
       });
     }
 
+    cacheService.invalidate('products:');
+    cacheService.invalidate('combos:');
+    cacheService.invalidate('admin:');
+
     res.status(200).json({
       success: true,
       message: 'Product deleted successfully'
@@ -219,17 +240,26 @@ exports.deleteProduct = async (req, res) => {
 // @access  Public
 exports.getFeaturedProducts = async (req, res) => {
   try {
+    const cached = cacheService.get('products:featured');
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
     const products = await Product.find({ isActive: true })
       .sort({ rating: -1 })
       .limit(8)
       .populate('categoryId', 'name slug')
       .lean();
 
-    res.status(200).json({
+    const payload = {
       success: true,
       count: products.length,
       data: products.map(enrichProductStock)
-    });
+    };
+
+    cacheService.set('products:featured', payload, 2 * 60 * 1000); // 2 min TTL
+
+    res.status(200).json(payload);
   } catch (error) {
     return serverError(res, error, 'productController.js → getFeaturedProducts');
   }

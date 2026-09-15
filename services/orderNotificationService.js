@@ -109,11 +109,12 @@ exports.sendOrderConfirmation = async (order, user) => {
     return { success: true, message: 'Customer confirmation email disabled in settings' };
   }
 
+  const recipient = user?.email || order?.shippingAddress?.email;
   const paid = order.paymentStatus === 'Paid';
   return send(
-    user?.email,
+    recipient,
     `Order ${order.orderNumber} confirmed — Fresh Veggies`,
-    layout(`Thanks for your order, ${user?.name || 'there'}!`, `
+    layout(`Thanks for your order, ${user?.name || order?.shippingAddress?.name || 'there'}!`, `
       <p style="font-size:14px">Your order <strong>${order.orderNumber}</strong> is confirmed and we're getting it ready.</p>
       <p style="font-size:14px">Payment: <strong>${order.paymentMode === 'COD' ? 'Cash on Delivery' : 'Paid online'}</strong>${paid ? ' ✅' : ''}</p>
       ${itemsTable(order)}
@@ -142,7 +143,7 @@ exports.notifyAdminNewOrder = async (order, user) => {
         layout(`New order received`, `
           <p style="font-size:14px"><strong>${order.orderNumber}</strong> · ${order.paymentMode === 'COD' ? 'Cash on Delivery' : 'Paid online'}</p>
           <h3 style="font-size:15px;margin:20px 0 4px">Customer</h3>
-          <p style="font-size:14px;margin:4px 0">${user?.name || '—'}<br>📞 ${user?.phone || '—'}<br>✉️ ${user?.email || '—'}</p>
+          <p style="font-size:14px;margin:4px 0">${user?.name || order?.shippingAddress?.name || '—'}<br>📞 ${user?.phone || order?.shippingAddress?.phone || '—'}<br>✉️ ${user?.email || order?.shippingAddress?.email || '—'}</p>
           ${itemsTable(order)}
           <h3 style="font-size:15px;margin:20px 0 4px">Ship to</h3>
           ${addressBlock(order.shippingAddress)}
@@ -163,6 +164,28 @@ exports.notifyAdminNewOrder = async (order, user) => {
   });
 };
 
+// ─── Admin: customer requested cancellation ──────────────────────────────────
+
+exports.notifyAdminCancellationRequest = async (order, user) => {
+  const settings = await Settings.getSingleton().catch(() => null);
+  const emailEnabled = settings ? settings.notifications?.admin?.cancellationRequest?.email !== false : true;
+
+  if (!emailEnabled) return { success: true, message: 'Admin cancellation-request email disabled in settings' };
+
+  const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.BREVO_FROM_EMAIL;
+  return send(
+    adminEmail,
+    `⚠️ Cancellation request — order ${order.orderNumber}`,
+    layout('Cancellation request received', `
+      <p style="font-size:14px"><strong>${order.orderNumber}</strong> — ${money(order.totalAmount)}</p>
+      <p style="font-size:14px">Customer: ${user?.name || order?.shippingAddress?.name || '—'} | 📞 ${user?.phone || order?.shippingAddress?.phone || '—'}</p>
+      <p style="font-size:14px">Reason: <em>${order.cancellationRequest?.reason || 'No reason given'}</em></p>
+      <p style="font-size:14px">Previous status: <strong>${order.cancellationRequest?.previousStatus || '—'}</strong></p>
+      <p style="font-size:14px">Please review and approve or reject this request in the admin panel.</p>
+    `)
+  );
+};
+
 // ─── Customer: status changed ────────────────────────────────────────────────
 
 const STATUS_COPY = {
@@ -177,6 +200,7 @@ exports.sendStatusUpdate = async (order, user, newStatus) => {
   const copy = STATUS_COPY[newStatus];
   if (!copy) return { success: false, message: `No customer copy for status "${newStatus}"` };
 
+  const recipient = user?.email || order?.shippingAddress?.email;
   const tracking = newStatus === 'Shipped' && order.shipping?.awbNumber
     ? `<p style="font-size:14px">Courier: <strong>${order.shipping.courierName || 'DTDC'}</strong><br>
          Tracking number: <strong>${order.shipping.awbNumber}</strong></p>
@@ -188,10 +212,10 @@ exports.sendStatusUpdate = async (order, user, newStatus) => {
     : '';
 
   return send(
-    user?.email,
+    recipient,
     `Order ${order.orderNumber} ${copy.subject} — Fresh Veggies`,
     layout(copy.title, `
-      <p style="font-size:14px">Hi ${user?.name || 'there'}, ${copy.body}</p>
+      <p style="font-size:14px">Hi ${user?.name || order?.shippingAddress?.name || 'there'}, ${copy.body}</p>
       <p style="font-size:14px">Order <strong>${order.orderNumber}</strong> · ${money(order.totalAmount)}</p>
       ${tracking}
       ${refund}
@@ -202,12 +226,24 @@ exports.sendStatusUpdate = async (order, user, newStatus) => {
 // ─── Customer: refund processed ──────────────────────────────────────────────
 
 exports.sendRefundNotification = async (order, user) => send(
-  user?.email,
+  user?.email || order?.shippingAddress?.email,
   `Refund initiated for order ${order.orderNumber}`,
   layout('Refund on its way', `
-    <p style="font-size:14px">Hi ${user?.name || 'there'}, we've initiated a refund of
+    <p style="font-size:14px">Hi ${user?.name || order?.shippingAddress?.name || 'there'}, we've initiated a refund of
       <strong>${money(order.refund?.refundAmount || order.totalAmount)}</strong> for order
       <strong>${order.orderNumber}</strong>.</p>
     <p style="font-size:14px">It should appear in your account within 5–7 business days.</p>
+  `)
+);
+
+// ─── Customer: cancellation request rejected ─────────────────────────────────
+
+exports.sendCancellationRejected = async (order, user, rejectionReason) => send(
+  user?.email || order?.shippingAddress?.email,
+  `Update on order ${order.orderNumber} cancellation request — Fresh Veggies`,
+  layout('Cancellation request update', `
+    <p style="font-size:14px">Hi ${user?.name || order?.shippingAddress?.name || 'there'}, your cancellation request for order <strong>${order.orderNumber}</strong> could not be approved.</p>
+    <p style="font-size:14px"><strong>Reason:</strong> <em>${rejectionReason || 'Order is already being prepared or dispatched.'}</em></p>
+    <p style="font-size:14px">Your order status remains <strong>${order.orderStatus}</strong> and we will continue processing your delivery.</p>
   `)
 );

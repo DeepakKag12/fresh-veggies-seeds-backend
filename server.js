@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
+const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 
 // Load environment variables FIRST before anything else
@@ -60,6 +61,17 @@ const corsOptions = {
 // ─── Security middleware ──────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors(corsOptions));
+
+// ─── Response Compression ────────────────────────────────────────────────────
+// Gzip/Brotli compression cuts payload sizes for product/order/category JSON
+// responses by ~75-85%, improving load times on mobile and slow networks.
+app.use(compression({
+  threshold: 1024,
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
+  }
+}));
 
 // ─── Webhook route must receive RAW body (before express.json) ───────────────
 app.use('/api/payments/webhook', express.raw({ type: 'application/json' }));
@@ -261,8 +273,8 @@ app.use('/api/admin',       require('./routes/adminRoutes'));
 app.use('/api/upload',      require('./routes/uploadRoutes'));
 app.use('/api/coupons',     require('./routes/couponRoutes'));
 app.use('/api/reviews',     require('./routes/reviewRoutes'));
-app.use('/api/banners',     require('./routes/bannerRoutes'));
-app.use('/api/settings',    require('./routes/settingsRoutes'));
+app.use('/api/banners',     publicCache({ maxAge: 120, sMaxAge: 300, staleWhileRevalidate: 600 }), require('./routes/bannerRoutes'));
+app.use('/api/settings',    publicCache({ maxAge: 300, sMaxAge: 600, staleWhileRevalidate: 1800 }), require('./routes/settingsRoutes'));
 
 // ─── Root / Health ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {

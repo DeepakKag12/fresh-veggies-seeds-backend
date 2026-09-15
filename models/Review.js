@@ -64,7 +64,8 @@ const reviewSchema = new mongoose.Schema({
 });
 
 // Index for faster queries
-reviewSchema.index({ productId: 1, isApproved: 1 });
+reviewSchema.index({ productId: 1, isApproved: 1, createdAt: -1 });
+reviewSchema.index({ isApproved: 1, createdAt: -1 });
 reviewSchema.index({ userId: 1 });
 
 // One review per customer per product. The controller's findOne-then-create

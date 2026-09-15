@@ -62,15 +62,17 @@ exports.validateCoupon = async (code, itemsPrice, userId) => {
 
   // Per-user limit. Only orders that actually stand count against the user:
   // a cancelled or payment-failed order must not consume someone's allowance.
-  const userUsageCount = await Order.countDocuments({
-    userId,
-    'couponUsed.code': normalized,
-    orderStatus:   { $ne: 'Cancelled' },
-    paymentStatus: { $ne: 'Failed' }
-  });
+  if (userId) {
+    const userUsageCount = await Order.countDocuments({
+      userId,
+      'couponUsed.code': normalized,
+      orderStatus:   { $ne: 'Cancelled' },
+      paymentStatus: { $ne: 'Failed' }
+    });
 
-  if (coupon.perUserLimit && userUsageCount >= coupon.perUserLimit) {
-    return { valid: false, message: 'You have already used this coupon.' };
+    if (coupon.perUserLimit && userUsageCount >= coupon.perUserLimit) {
+      return { valid: false, message: 'You have already used this coupon.' };
+    }
   }
 
   // ── Discount calculation ───────────────────────────────────────────────────

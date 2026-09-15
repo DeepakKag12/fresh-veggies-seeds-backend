@@ -1,4 +1,5 @@
 const Banner = require('../models/Banner');
+const cacheService = require('../utils/cacheService');
 const { serverError } = require('../utils/respond');
 
 // @desc    Get all banners (Admin)
@@ -6,7 +7,7 @@ const { serverError } = require('../utils/respond');
 // @access  Private/Admin
 exports.getAllBanners = async (req, res) => {
   try {
-    const banners = await Banner.find().sort({ position: 1, order: 1 });
+    const banners = await Banner.find().sort({ position: 1, order: 1 }).lean();
 
     res.status(200).json({
       success: true,
@@ -24,6 +25,12 @@ exports.getAllBanners = async (req, res) => {
 exports.getActiveBanners = async (req, res) => {
   try {
     const { position } = req.query;
+    const cacheKey = `banners:active:${position || 'all'}`;
+    const cached = cacheService.get(cacheKey);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
     const now = new Date();
 
     const query = {
@@ -41,17 +48,24 @@ exports.getActiveBanners = async (req, res) => {
 
     const banners = await Banner.find(query).sort({ order: 1 }).lean();
 
-    // Increment view count
-    await Banner.updateMany(
-      { _id: { $in: banners.map(b => b._id) } },
-      { $inc: { viewCount: 1 } }
-    );
+    // Increment view count asynchronously in the background so it never delays the HTTP response
+    if (banners.length > 0) {
+      Banner.updateMany(
+        { _id: { $in: banners.map(b => b._id) } },
+        { $inc: { viewCount: 1 } }
+      ).catch((err) => console.error('Banner viewCount update error:', err.message));
+    }
 
-    res.status(200).json({
+    const payload = {
       success: true,
       count: banners.length,
       data: banners
-    });
+    };
+
+    // Cache in memory for 5 minutes
+    cacheService.set(cacheKey, payload, 5 * 60 * 1000);
+
+    res.status(200).json(payload);
   } catch (error) {
     return serverError(res, error, 'bannerController.js → getActiveBanners');
   }
@@ -62,6 +76,7 @@ exports.getActiveBanners = async (req, res) => {
 // @access  Public
 exports.trackBannerClick = async (req, res) => {
   try {
+    // Non-blocking update or fast update
     await Banner.findByIdAndUpdate(
       req.params.id,
       { $inc: { clickCount: 1 } }
@@ -82,6 +97,8 @@ exports.trackBannerClick = async (req, res) => {
 exports.createBanner = async (req, res) => {
   try {
     const banner = await Banner.create(req.body);
+
+    cacheService.invalidate('banners:');
 
     res.status(201).json({
       success: true,
@@ -110,6 +127,8 @@ exports.updateBanner = async (req, res) => {
       });
     }
 
+    cacheService.invalidate('banners:');
+
     res.status(200).json({
       success: true,
       data: banner
@@ -132,6 +151,8 @@ exports.deleteBanner = async (req, res) => {
         message: 'Banner not found'
       });
     }
+
+    cacheService.invalidate('banners:');
 
     res.status(200).json({
       success: true,
