@@ -138,7 +138,29 @@ const verifyAccessToken = async (accessToken, fallbackPhone = null) => {
 const otpCache = new Map();
 
 /**
- * Send OTP directly to customer's mobile number via MSG91 SMS API.
+ * Check MSG91 SMS balance. Returns the number of remaining SMS credits.
+ */
+const checkBalance = async (authKey) => {
+  try {
+    const res = await axios.get(
+      `https://api.msg91.com/api/balance.php?authkey=${authKey}&type=4`,
+      { timeout: 5000 }
+    );
+    const balance = parseInt(res.data, 10);
+    return isNaN(balance) ? -1 : balance;
+  } catch {
+    return -1; // Unknown balance
+  }
+};
+
+/**
+ * Send OTP to customer's mobile number via MSG91 direct API.
+ *
+ * Flow:
+ *   1. Check MSG91 SMS balance and log clearly
+ *   2. Send OTP via MSG91 /v5/otp endpoint
+ *   3. Cache OTP server-side for verification
+ *   4. Return honest message if balance is 0 (API accepts but doesn't deliver)
  */
 const sendOtp = async (phone) => {
   const cleanPhone = normalizePhone(phone);
@@ -147,41 +169,77 @@ const sendOtp = async (phone) => {
   }
 
   const authKey = process.env.MSG91_AUTH_KEY;
-  const generatedOtp = Math.floor(1000 + Math.random() * 9000).toString();
-  otpCache.set(cleanPhone, {
-    otp: generatedOtp,
-    expiresAt: Date.now() + 10 * 60 * 1000 // 10 min
-  });
+  if (!authKey || authKey === 'your_msg91_auth_key_here') {
+    console.error('❌ MSG91_AUTH_KEY is not configured');
+    return { success: false, message: 'SMS service is not configured. Please contact support.' };
+  }
 
-  if (authKey && authKey !== 'your_msg91_auth_key_here') {
-    try {
-      const url = `https://control.msg91.com/api/v5/otp?mobile=91${cleanPhone}&authkey=${authKey}&otp=${generatedOtp}&otp_length=4`;
-      const response = await axios.post(
-        url,
-        {},
-        {
-          headers: { authkey: authKey },
-          timeout: 10000
-        }
-      );
-      console.log(`📱 MSG91 SMS OTP sent to +91 ${cleanPhone}. Request ID:`, response.data?.request_id);
+  // Generate OTP for server-side cache verification
+  const generatedOtp = Math.floor(1000 + Math.random() * 9000).toString();
+
+  // Check balance first for clear logging
+  const balance = await checkBalance(authKey);
+  console.log(`💰 [MSG91] SMS balance check: ${balance} credits`);
+
+  if (balance === 0) {
+    console.error('❌ [MSG91] SMS balance is 0 — SMS will NOT be delivered. Please recharge at https://control.msg91.com/');
+  }
+
+  // Send OTP via MSG91 direct API
+  try {
+    const url = `https://control.msg91.com/api/v5/otp?mobile=91${cleanPhone}&authkey=${authKey}&otp=${generatedOtp}&otp_length=4&otp_expiry=10`;
+    const response = await axios.post(
+      url,
+      {},
+      {
+        headers: { authkey: authKey },
+        timeout: 10000
+      }
+    );
+
+    console.log(`📱 [MSG91] OTP send to +91 ${cleanPhone}: ${JSON.stringify(response.data)}`);
+
+    if (response.data?.type === 'success' || response.data?.request_id) {
+      // Cache for server-side verification
+      otpCache.set(cleanPhone, {
+        otp: generatedOtp,
+        expiresAt: Date.now() + 10 * 60 * 1000 // 10 min
+      });
+
+      if (balance === 0) {
+        // API accepted but balance is 0 — SMS won't be delivered
+        console.warn('⚠️ [MSG91] API returned success but balance is 0. SMS will NOT reach the phone.');
+        return {
+          success: true,
+          message: `OTP request submitted for +91 ${cleanPhone}. If SMS doesn't arrive, MSG91 account needs recharge.`,
+          requestId: response.data.request_id,
+          balanceWarning: true
+        };
+      }
+
       return {
         success: true,
         message: `OTP sent successfully to +91 ${cleanPhone}`,
-        requestId: response.data?.request_id,
-        devOtp: generatedOtp
+        requestId: response.data.request_id
       };
-    } catch (err) {
-      console.error('⚠️ MSG91 Send OTP error:', err.response?.data || err.message);
     }
-  }
 
-  return {
-    success: true,
-    message: `OTP sent to +91 ${cleanPhone}`,
-    devOtp: generatedOtp
-  };
+    // Non-success response from MSG91
+    console.error('❌ [MSG91] Non-success response:', JSON.stringify(response.data));
+    return {
+      success: false,
+      message: response.data?.message || 'MSG91 could not send OTP. Please try again.'
+    };
+  } catch (err) {
+    console.error('❌ [MSG91] Send OTP failed:', err.response?.data || err.message);
+    return {
+      success: false,
+      message: 'Failed to send OTP. Please try again later or contact support.'
+    };
+  }
 };
+
+
 
 /**
  * Verify OTP directly via MSG91 or verified cache.
