@@ -70,20 +70,24 @@ const getShippingRules = async () => {
   }
 };
 
-// ─── Order state machine ─────────────────────────────────────────────────────
-// The only status transitions an admin action may perform. Anything not listed
-// is rejected, so an order can never jump from Pending straight to Delivered or
-// come back from a terminal state.
+const ALL_ORDER_STATUSES = [
+  'Pending',
+  'Confirmed',
+  'Packed',
+  'Shipped',
+  'Delivered',
+  'Cancelled',
+  'CancellationRequested',
+];
+
+// Standard workflow suggestions for UI shortcuts
 const ALLOWED_TRANSITIONS = {
-  Pending:               ['Confirmed', 'Cancelled'],
-  Confirmed:             ['Packed', 'Cancelled'],
-  Packed:                ['Shipped', 'Cancelled'],
-  Shipped:               ['Delivered'],
-  Delivered:             [],            // terminal
-  Cancelled:             [],            // terminal
-  // An admin must be able to APPROVE a cancellation, not only reject it.
-  // 'Cancelled' was missing here, so every order a customer asked to cancel got
-  // stuck in this state permanently and its stock stayed committed forever.
+  Pending:               ['Confirmed', 'Packed', 'Shipped', 'Delivered', 'Cancelled'],
+  Confirmed:             ['Pending', 'Packed', 'Shipped', 'Delivered', 'Cancelled'],
+  Packed:                ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled'],
+  Shipped:               ['Pending', 'Confirmed', 'Packed', 'Delivered', 'Cancelled'],
+  Delivered:             ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Cancelled'],
+  Cancelled:             ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Delivered'],
   CancellationRequested: ['Cancelled', 'Confirmed', 'Packed', 'Shipped'],
 };
 
@@ -96,7 +100,10 @@ const TERMINAL_STATUSES = ['Delivered', 'Cancelled'];
 /** Statuses at which stock has been committed to the customer. */
 const STOCK_COMMITTED_STATUSES = ['Confirmed', 'Packed', 'Shipped', 'Delivered'];
 
-const canTransition = (from, to) => (ALLOWED_TRANSITIONS[from] || []).includes(to);
+const canTransition = (from, to, isAdmin = true) => {
+  if (isAdmin) return ALL_ORDER_STATUSES.includes(to);
+  return (ALLOWED_TRANSITIONS[from] || []).includes(to);
+};
 
 module.exports = {
   FREE_DELIVERY_THRESHOLD: DEFAULT_FREE_DELIVERY_THRESHOLD,
@@ -104,6 +111,7 @@ module.exports = {
   computeShippingPrice,
   computeOnlineDiscount,
   getShippingRules,
+  ALL_ORDER_STATUSES,
   ALLOWED_TRANSITIONS,
   SHIPPABLE_STATUSES,
   TERMINAL_STATUSES,

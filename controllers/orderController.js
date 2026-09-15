@@ -380,64 +380,99 @@ exports.getAllOrders = async (req, res) => {
   }
 };
 
-// @desc    Update order status (Admin) — enforces state machine
+// @desc    Update order status (Admin) — allows admin to change status from anywhere
 // @route   PUT /api/orders/:id/status
 // @access  Private/Admin
 exports.updateOrderStatus = async (req, res) => {
   try {
-    const { orderStatus } = req.body;
+    const { orderStatus, note } = req.body;
+
+    const VALID_STATUSES = [
+      'Pending',
+      'Confirmed',
+      'Packed',
+      'Shipped',
+      'Delivered',
+      'Cancelled',
+      'CancellationRequested'
+    ];
+
+    if (!orderStatus || !VALID_STATUSES.includes(orderStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid order status "${orderStatus}". Must be one of: ${VALID_STATUSES.join(', ')}`
+      });
+    }
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    const allowed = ALLOWED_TRANSITIONS[order.orderStatus] || [];
-    if (!allowed.includes(orderStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot transition from "${order.orderStatus}" to "${orderStatus}". Allowed: [${allowed.join(', ') || 'none'}]`
+    const previousStatus = order.orderStatus;
+    if (previousStatus === orderStatus) {
+      return res.status(200).json({
+        success: true,
+        data: order,
+        message: `Order is already ${orderStatus}`
       });
     }
 
-    const previousStatus = order.orderStatus;
     order.orderStatus = orderStatus;
 
-    // Append-only audit trail — who moved this order, when, and from what.
+    // Append-only audit trail — who moved this order, when, from what, and why.
     order.statusHistory.push({
       status:    orderStatus,
       from:      previousStatus,
       changedAt: new Date(),
       changedBy: req.user._id,
-      note:      req.body.note || undefined
+      note:      note || `Status updated from ${previousStatus} to ${orderStatus} by admin`
     });
 
+    // Delivered handling
     if (orderStatus === 'Delivered') {
       order.deliveredAt = Date.now();
-      // COD: the money changes hands on delivery, so that is when it is paid.
-      if (order.paymentMode === 'COD') order.paymentStatus = 'Paid';
+      // COD: payment collected upon delivery
+      if (order.paymentMode === 'COD') {
+        order.paymentStatus = 'Paid';
+      }
+    }
+
+    // Cancelled handling
+    if (orderStatus === 'Cancelled') {
+      order.cancelledAt = Date.now();
+    } else if (previousStatus === 'Cancelled') {
+      // Admin revived a previously cancelled order
+      order.cancelledAt = undefined;
+      // If stock had been restored when it was cancelled, reset flags so stock can re-commit
+      if (order.stockRestored) {
+        order.stockRestored = false;
+        order.stockDecremented = false;
+      }
+    }
+
+    // If order was in CancellationRequested and admin changed status directly:
+    if (previousStatus === 'CancellationRequested' && orderStatus !== 'Cancelled') {
+      if (!order.cancellationRequest) order.cancellationRequest = {};
+      order.cancellationRequest.rejectedAt = Date.now();
+      order.cancellationRequest.rejectionReason = note || `Status updated to ${orderStatus} by admin`;
     }
 
     statsCache.invalidate('admin:');
 
-    if (orderStatus === 'Cancelled') {
-      order.cancelledAt = Date.now();
-    }
-
     await order.save();
 
-    // ── Inventory ─────────────────────────────────────────────────────────────
-    if (orderStatus === 'Confirmed') {
+    // ── Inventory Side Effects ───────────────────────────────────────────────
+    // If moving to any status where stock should be committed (and not already committed):
+    if (['Confirmed', 'Packed', 'Shipped', 'Delivered'].includes(orderStatus)) {
       stockService.decrementStockAfterConfirm(order).catch((err) =>
         console.error('⚠️  Stock decrement error:', err.message)
       );
     }
 
+    // If moving to Cancelled, return stock and release any coupon
     if (orderStatus === 'Cancelled') {
-      // Put the units back. Without this every cancellation permanently lost
-      // the stock it had taken on confirmation.
       stockService.restoreStockAfterCancel(order).catch((err) =>
         console.error('⚠️  Stock restore error:', err.message)
       );
-      // A cancelled order must not keep consuming the customer's coupon allowance.
       if (order.couponUsed?.couponId) {
         couponService.releaseCoupon(order.couponUsed.couponId).catch((err) =>
           console.error('⚠️  Coupon release error:', err.message)
@@ -445,10 +480,10 @@ exports.updateOrderStatus = async (req, res) => {
       }
     }
 
-    // ── Tell the customer ─────────────────────────────────────────────────────
+    // ── Notify Customer ───────────────────────────────────────────────────────
     const customer = await User.findById(order.userId).select('name email phone');
     notify.sendStatusUpdate(order, customer, orderStatus).catch((err) =>
-      console.error('⚠️  Status update email failed:', err.message)
+      console.error('⚠️  Status update notification failed:', err.message)
     );
 
     res.status(200).json({ success: true, data: order });
