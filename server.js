@@ -89,46 +89,37 @@ const envInt = (name, fallback) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-// Auth: 10 attempts per 15 min per IP
+// Auth: 60 attempts per 15 min per IP
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: envInt('RATE_LIMIT_AUTH', 10),
+  max: envInt('RATE_LIMIT_AUTH', 60),
   message: { success: false, message: 'Too many auth attempts, please try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false
 });
 
-// OTP: 5 sends per 10 min (per IP)
-const otpLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: envInt('RATE_LIMIT_OTP', 5),
-  message: { success: false, message: 'Too many OTP requests. Please wait 10 minutes.' },
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-// Payment: 20 requests per 10 min
+// Payment: 50 requests per 10 min
 const paymentLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: envInt('RATE_LIMIT_PAYMENT', 20),
+  max: envInt('RATE_LIMIT_PAYMENT', 50),
   message: { success: false, message: 'Too many payment requests. Please wait a moment.' },
   standardHeaders: true,
   legacyHeaders: false
 });
 
-// Order creation: 30 per 10 min
+// Order creation: 60 per 10 min
 const orderLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: envInt('RATE_LIMIT_ORDER', 30),
+  max: envInt('RATE_LIMIT_ORDER', 60),
   message: { success: false, message: 'Too many order requests.' },
   standardHeaders: true,
   legacyHeaders: false
 });
 
-// General API: 200 per 15 min
+// General API: 2000 per 15 min (generous so mobile and desktop users browsing products never get IP blocked)
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: envInt('RATE_LIMIT_GENERAL', 200),
+  max: envInt('RATE_LIMIT_GENERAL', 2000),
   standardHeaders: true,
   legacyHeaders: false
 });
@@ -251,9 +242,6 @@ app.use(async (req, res, next) => {
 const authRoutes = require('./routes/authRoutes');
 app.use('/api/auth/login',         authLimiter);
 app.use('/api/auth/register',      authLimiter);
-app.use('/api/auth/send-otp',      otpLimiter);
-app.use('/api/auth/verify-otp',    otpLimiter);
-app.use('/api/auth/forgot-password', otpLimiter);
 app.use('/api/auth',               authRoutes);
 
 // Categories change rarely — cache hard, revalidate lazily.
