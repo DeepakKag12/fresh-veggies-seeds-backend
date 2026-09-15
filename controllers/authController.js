@@ -883,6 +883,107 @@ exports.verifyMsg91Token = async (req, res) => {
   }
 };
 
+// @desc    Send MSG91 SMS OTP directly
+// @route   POST /api/auth/msg91/send-otp
+// @access  Public
+exports.sendMsg91Otp = async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) {
+      return res.status(400).json({ success: false, message: 'Please provide a 10-digit mobile number' });
+    }
+
+    const result = await msg91Service.sendOtp(phone);
+    if (!result.success) {
+      return res.status(400).json({ success: false, message: result.message });
+    }
+
+    res.status(200).json(result);
+  } catch (error) {
+    return serverError(res, error, 'authController.js → sendMsg91Otp');
+  }
+};
+
+// @desc    Verify MSG91 SMS OTP and authenticate/create customer
+// @route   POST /api/auth/msg91/verify-otp
+// @access  Public
+exports.verifyMsg91Otp = async (req, res) => {
+  try {
+    const { phone, otp, name } = req.body;
+    if (!phone || !otp) {
+      return res.status(400).json({ success: false, message: 'Phone number and 4-digit OTP are required' });
+    }
+
+    const verification = await msg91Service.verifyOtp(phone, otp);
+    if (!verification.success) {
+      return res.status(400).json({ success: false, message: verification.message || 'Invalid OTP' });
+    }
+
+    const verifiedPhone = verification.phone;
+
+    let user = await User.findOne({ phone: verifiedPhone });
+    let isNewUser = false;
+
+    if (user) {
+      if (!user.isActive) {
+        return res.status(403).json({ success: false, message: 'Account has been deactivated. Please contact support.' });
+      }
+      user.loginAttempts = 0;
+      user.isLocked = false;
+      user.lockedUntil = undefined;
+      user.lastLogin = new Date();
+      await user.save({ validateBeforeSave: false });
+    } else {
+      isNewUser = true;
+      const cleanCustomerName = cleanText(name || `Customer ${verifiedPhone.slice(-4)}`, 100);
+      user = await User.create({
+        name: cleanCustomerName,
+        phone: verifiedPhone,
+        role: 'customer',
+        isActive: true,
+        emailVerified: false,
+        addresses: []
+      });
+    }
+
+    const token = generateToken(user);
+
+    return res.status(200).json({
+      success: true,
+      message: isNewUser ? 'Welcome to Fresh Veggies!' : 'Welcome back!',
+      isNewUser,
+      data: {
+        _id: user._id,
+        name: user.name,
+        email: user.email || '',
+        phone: user.phone,
+        role: user.role,
+        address: user.address,
+        addresses: user.addresses || [],
+        token
+      }
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → verifyMsg91Otp');
+  }
+};
+
+// @desc    Resend MSG91 SMS OTP
+// @route   POST /api/auth/msg91/resend-otp
+// @access  Public
+exports.resendMsg91Otp = async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) {
+      return res.status(400).json({ success: false, message: 'Phone number is required' });
+    }
+    const result = await msg91Service.resendOtp(phone);
+    return res.status(200).json(result);
+  } catch (error) {
+    return serverError(res, error, 'authController.js → resendMsg91Otp');
+  }
+};
+
 // @desc    Log out of every device by invalidating all existing tokens
 // @route   POST /api/auth/logout
 // @access  Private

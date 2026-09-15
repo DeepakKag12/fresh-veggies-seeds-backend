@@ -16,6 +16,9 @@ const {
   updateCart,
   verifyEmail,
   verifyMsg91Token,
+  sendMsg91Otp,
+  verifyMsg91Otp,
+  resendMsg91Otp,
   addAddress,
   updateAddress,
   deleteAddress,
@@ -37,7 +40,10 @@ router.post('/register', register);
 router.post('/login', login);
 router.get('/verify-email/:token', verifyEmail);
 
-// MSG91 SMS OTP verification route
+// MSG91 SMS OTP verification routes (both direct OTP flow and token widget)
+router.post('/msg91/send-otp', msg91Limiter, sendMsg91Otp);
+router.post('/msg91/verify-otp', msg91Limiter, verifyMsg91Otp);
+router.post('/msg91/resend-otp', msg91Limiter, resendMsg91Otp);
 router.post('/msg91/verify-token', msg91Limiter, verifyMsg91Token);
 
 // Password recovery routes
