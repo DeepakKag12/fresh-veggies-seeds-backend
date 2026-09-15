@@ -45,6 +45,7 @@ router.post('/msg91/send-otp', msg91Limiter, sendMsg91Otp);
 router.post('/msg91/verify-otp', msg91Limiter, verifyMsg91Otp);
 router.post('/msg91/resend-otp', msg91Limiter, resendMsg91Otp);
 router.post('/msg91/verify-token', msg91Limiter, verifyMsg91Token);
+router.post('/msg91-verify', msg91Limiter, verifyMsg91Token);
 
 // Password recovery routes
 router.post('/forgot-password', forgotPassword);

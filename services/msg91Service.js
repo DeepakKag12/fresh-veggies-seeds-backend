@@ -124,6 +124,7 @@ const verifyAccessToken = async (accessToken) => {
   return {
     success: true,
     phone: normalized,
+    mobile: normalized,
     rawResponse: responseData
   };
 };
