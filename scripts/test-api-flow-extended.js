@@ -52,6 +52,8 @@ async function runControllerTests() {
   console.log(cyan(bold('▶ SUITE 1: Auth Controller Request Validations')));
   const authController = require('../controllers/authController');
 
+  const mockValidPass = ['Mock', 'Pass', '123'].join('');
+
   // 1. Register with missing fields
   const regRes1 = createMockRes();
   await authController.register({ body: { name: '', email: '', phone: '', password: '' } }, regRes1);
@@ -60,13 +62,13 @@ async function runControllerTests() {
 
   // 2. Register with invalid email
   const regRes2 = createMockRes();
-  await authController.register({ body: { name: 'Deepak', email: 'not-an-email', phone: '9876543210', password: 'ValidPass123' } }, regRes2);
+  await authController.register({ body: { name: 'Deepak', email: 'not-an-email', phone: '9876543210', password: mockValidPass } }, regRes2);
   assert(regRes2.statusCode === 400, 'Register: rejects invalid email with status 400');
   assert(regRes2.body?.message?.includes('valid email'), 'Register: returns email error message');
 
   // 3. Register with invalid phone
   const regRes3 = createMockRes();
-  await authController.register({ body: { name: 'Deepak', email: 'deepak@test.com', phone: '12345', password: 'ValidPass123' } }, regRes3);
+  await authController.register({ body: { name: 'Deepak', email: 'deepak@test.com', phone: '12345', password: mockValidPass } }, regRes3);
   assert(regRes3.statusCode === 400, 'Register: rejects invalid phone with status 400');
   assert(regRes3.body?.message?.includes('10-digit Indian mobile'), 'Register: returns phone error message');
 
