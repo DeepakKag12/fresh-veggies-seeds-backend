@@ -7,6 +7,14 @@
 const MAX_ITEMS_PER_ORDER  = 20;  // maximum distinct line items
 const MAX_QTY_PER_ITEM     = 100; // maximum quantity per line item
 
+/** Check if name is an auto-generated placeholder */
+const isPlaceholderCustomerName = (name) => {
+  if (!name || typeof name !== 'string') return true;
+  const trimmed = name.trim();
+  if (trimmed.length < 2) return true;
+  return /^customer(\s*\d+)?$/i.test(trimmed);
+};
+
 /**
  * Validate the orderItems array.
  */
@@ -40,7 +48,12 @@ function validateShippingAddress(addr) {
     return { valid: false, message: 'Shipping address is required.' };
   }
   const { name, phone, street, city, state, pincode } = addr;
-  if (!name?.trim())    return { valid: false, message: 'Shipping name is required.' };
+  if (!name?.trim()) {
+    return { valid: false, message: 'Shipping name is required.' };
+  }
+  if (isPlaceholderCustomerName(name)) {
+    return { valid: false, message: 'Please provide the customer\'s real Full Name (e.g. Rahul Sharma).' };
+  }
   if (!phone?.toString().trim()) return { valid: false, message: 'Phone number is required.' };
   if (!street?.trim())  return { valid: false, message: 'Street address is required.' };
   if (!city?.trim())    return { valid: false, message: 'City is required.' };
@@ -54,4 +67,4 @@ function validateShippingAddress(addr) {
   return { valid: true };
 }
 
-module.exports = { validateOrderItems, validateShippingAddress };
+module.exports = { validateOrderItems, validateShippingAddress, isPlaceholderCustomerName };

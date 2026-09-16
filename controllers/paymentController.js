@@ -51,9 +51,9 @@ const saveAddressToUser = async (userId, shippingAddress) => {
       };
     }
 
-    // Update user name if currently default
-    if (shippingAddress.name && (!user.name || user.name.startsWith('Customer '))) {
-      user.name = shippingAddress.name;
+    // Update user name if currently default or placeholder
+    if (shippingAddress.name && (!user.name || /^customer(\s*\d+)?$/i.test(user.name.trim()))) {
+      user.name = shippingAddress.name.trim();
     }
 
     // Save optional email if not yet set on profile and not already registered to another user

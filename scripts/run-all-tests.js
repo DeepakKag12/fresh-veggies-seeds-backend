@@ -88,10 +88,18 @@ async function runAllSuites() {
     pincode: ''
   }).valid === false, 'Rejects empty PIN code');
 
-  // Missing address fields
+  // Missing or placeholder address fields
   assert(validateShippingAddress({
     name: '', phone: '9876543210', street: 'Street', city: 'City', state: 'State', pincode: '452001'
   }).valid === false, 'Rejects missing name in shipping address');
+
+  assert(validateShippingAddress({
+    name: 'Customer 1234', phone: '9876543210', street: 'Street', city: 'City', state: 'State', pincode: '452001'
+  }).valid === false, 'Rejects placeholder Customer 1234 in shipping address');
+
+  assert(validateShippingAddress({
+    name: 'Customer', phone: '9876543210', street: 'Street', city: 'City', state: 'State', pincode: '452001'
+  }).valid === false, 'Rejects placeholder Customer in shipping address');
 
   assert(validateShippingAddress({
     name: 'User', phone: '', street: 'Street', city: 'City', state: 'State', pincode: '452001'
