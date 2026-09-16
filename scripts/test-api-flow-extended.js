@@ -82,6 +82,26 @@ async function runControllerTests() {
   await authController.login({ body: { email: '', password: '' } }, loginRes1);
   assert(loginRes1.statusCode === 400, 'Login: rejects empty credentials with status 400');
 
+  // 6. Login with phone identifier but missing password
+  const loginRes2 = createMockRes();
+  await authController.login({ body: { identifier: '9876543210', password: '' } }, loginRes2);
+  assert(loginRes2.statusCode === 400, 'Login: rejects phone identifier with missing password (400)');
+
+  // 7. Send OTP with empty payload
+  const sendOtpRes = createMockRes();
+  await authController.sendOTP({ body: {} }, sendOtpRes);
+  assert(sendOtpRes.statusCode === 400, 'SendOTP: rejects empty payload with status 400');
+
+  // 8. Verify OTP with missing OTP code
+  const verifyOtpRes = createMockRes();
+  await authController.verifyOTP({ body: { phone: '9876543210', otp: '' } }, verifyOtpRes);
+  assert(verifyOtpRes.statusCode === 400, 'VerifyOTP: rejects missing OTP with status 400');
+
+  // 9. Verify MSG91 OTP with missing fields
+  const verifyMsg91Res = createMockRes();
+  await authController.verifyMsg91Otp({ body: {} }, verifyMsg91Res);
+  assert(verifyMsg91Res.statusCode === 400, 'VerifyMsg91Otp: rejects missing fields with status 400');
+
   // ─────────────────────────────────────────────────────────────
   // SUITE 2: ORDER & PAYMENT CONTROLLER VALIDATION
   // ─────────────────────────────────────────────────────────────

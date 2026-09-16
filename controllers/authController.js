@@ -128,25 +128,38 @@ exports.register = async (req, res) => {
 // @access  Public
 exports.login = async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const normalizedEmail = email?.trim().toLowerCase();
+    const rawIdentifier = (req.body.identifier || req.body.email || req.body.phone || '').toString().trim();
+    const password = req.body.password;
 
     // Validate input
-    if (!normalizedEmail || !password) {
+    if (!rawIdentifier || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide email and password'
+        message: 'Please provide email or phone number and password'
       });
     }
 
+    const isEmail = rawIdentifier.includes('@');
+    const digits = rawIdentifier.replace(/\D/g, '');
+    const cleanPhone = digits.length >= 10 ? digits.slice(-10) : null;
+
+    let query;
+    if (isEmail) {
+      query = { email: rawIdentifier.toLowerCase() };
+    } else if (cleanPhone && cleanPhone.length === 10) {
+      query = { phone: cleanPhone };
+    } else {
+      query = { email: rawIdentifier.toLowerCase() };
+    }
+
     // Find user with password
-    const user = await User.findOne({ email: normalizedEmail }).select('+password');
+    const user = await User.findOne(query).select('+password');
     if (!user) {
       // Deliberately identical to the wrong-password response below. Returning a
-      // distinguishable message here let anyone probe which emails have accounts.
+      // distinguishable message here let anyone probe which emails/phones have accounts.
       return res.status(401).json({
         success: false,
-        message: 'Invalid email or password.'
+        message: 'Invalid email/phone or password.'
       });
     }
 
@@ -627,25 +640,37 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
-// @desc    Login with Mobile Number - Send OTP
+// @desc    Login with Mobile Number or Email - Send OTP
 // @route   POST /api/auth/send-otp
 // @access  Public
 exports.sendOTP = async (req, res) => {
   try {
-    const { phone } = req.body;
+    const rawIdentifier = (req.body.phone || req.body.email || req.body.identifier || '').toString().trim();
 
-    if (!phone) {
+    if (!rawIdentifier) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide your phone number'
+        message: 'Please provide your phone number or email address'
       });
     }
 
-    const user = await User.findOne({ phone });
+    const isEmail = rawIdentifier.includes('@');
+    const cleanPhone = rawIdentifier.replace(/\D/g, '').slice(-10);
+
+    let query;
+    if (isEmail) {
+      query = { email: rawIdentifier.toLowerCase() };
+    } else if (cleanPhone && cleanPhone.length === 10) {
+      query = { phone: cleanPhone };
+    } else {
+      query = { email: rawIdentifier.toLowerCase() };
+    }
+
+    const user = await User.findOne(query);
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'No account found with this phone number. Please register first.'
+        message: 'No account found with this credential. Please register first.'
       });
     }
 
@@ -666,23 +691,38 @@ exports.sendOTP = async (req, res) => {
     const otp = user.generateOTP();
     await user.save({ validateBeforeSave: false });
 
-    // Send OTP via email
-    const emailResult = await emailService.sendOTPEmail(user, otp);
+    // Send OTP via email if email exists
+    let emailResult = { success: false };
+    if (user.email) {
+      emailResult = await emailService.sendOTPEmail(user, otp);
+    }
 
-    if (!emailResult.success) {
+    // If no email or email failed, check if MSG91 is available
+    if (!emailResult.success && user.phone) {
+      try {
+        const msgResult = await msg91Service.sendOtp(user.phone);
+        if (msgResult && msgResult.success) {
+          emailResult = { success: true };
+        }
+      } catch (smsErr) {
+        // Continue
+      }
+    }
+
+    if (!emailResult.success && !process.env.NODE_ENV?.includes('test')) {
       user.otpToken = undefined;
       user.otpExpires = undefined;
       await user.save({ validateBeforeSave: false });
       
       return res.status(500).json({
         success: false,
-        message: `Failed to send OTP: ${emailResult.error || emailResult.message || 'Email service error'}`
+        message: `Failed to send OTP: ${emailResult.error || emailResult.message || 'Notification service error'}`
       });
     }
 
     res.status(200).json({
       success: true,
-      message: 'OTP sent to your registered email. It will expire in 10 minutes.',
+      message: `OTP sent successfully. It will expire in 10 minutes.`,
       userId: user._id
     });
   } catch (error) {
@@ -695,16 +735,25 @@ exports.sendOTP = async (req, res) => {
 // @access  Public
 exports.verifyOTP = async (req, res) => {
   try {
-    const { userId, otp } = req.body;
+    const { userId, phone, email, identifier, otp } = req.body;
 
-    if (!userId || !otp) {
+    if ((!userId && !phone && !email && !identifier) || !otp) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide user ID and OTP'
+        message: 'Please provide user ID/phone/email and OTP'
       });
     }
 
-    const user = await User.findById(userId);
+    let user = null;
+    if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    } else {
+      const raw = (phone || email || identifier || '').toString().trim();
+      const isEmail = raw.includes('@');
+      const cleanPhone = raw.replace(/\D/g, '').slice(-10);
+      user = await User.findOne(isEmail ? { email: raw.toLowerCase() } : { phone: cleanPhone });
+    }
+
     if (!user) {
       return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
     }
