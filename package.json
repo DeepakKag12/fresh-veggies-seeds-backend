@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "dev:memory": "node scripts/dev-server.js"
+    "dev:memory": "node scripts/dev-server.js",
+    "test": "node scripts/run-all-tests.js && node scripts/test-api-flow-extended.js && node scripts/test-admin-crud.js && node scripts/test-integration.js"
   },
   "keywords": [],
   "author": "",

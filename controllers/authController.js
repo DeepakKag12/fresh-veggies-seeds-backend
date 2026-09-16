@@ -1014,6 +1014,11 @@ exports.addAddress = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Street, city, state, and pincode are required.' });
     }
 
+    const pinStr = pincode.toString().trim();
+    if (!/^[1-9][0-9]{5}$/.test(pinStr)) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid 6-digit Indian PIN code.' });
+    }
+
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -1032,7 +1037,7 @@ exports.addAddress = async (req, res) => {
       street: cleanText(street, 200),
       city: cleanText(city, 100),
       state: cleanText(state, 100),
-      pincode: cleanText(pincode, 10),
+      pincode: cleanText(pinStr, 10),
       country: cleanText(country, 100) || 'India',
       isDefault: shouldBeDefault,
       createdAt: new Date()
@@ -1078,12 +1083,19 @@ exports.updateAddress = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Address not found' });
     }
 
+    if (pincode !== undefined) {
+      const pinStr = pincode.toString().trim();
+      if (!/^[1-9][0-9]{5}$/.test(pinStr)) {
+        return res.status(400).json({ success: false, message: 'Please provide a valid 6-digit Indian PIN code.' });
+      }
+      addr.pincode = cleanText(pinStr, 10);
+    }
+
     if (name !== undefined) addr.name = cleanText(name, 100);
     if (phone !== undefined) addr.phone = cleanText(phone, 20);
     if (street !== undefined) addr.street = cleanText(street, 200);
     if (city !== undefined) addr.city = cleanText(city, 100);
     if (state !== undefined) addr.state = cleanText(state, 100);
-    if (pincode !== undefined) addr.pincode = cleanText(pincode, 10);
     if (country !== undefined) addr.country = cleanText(country, 100) || 'India';
 
     if (isDefault === true) {

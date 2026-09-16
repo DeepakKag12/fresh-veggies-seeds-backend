@@ -45,7 +45,11 @@ function validateShippingAddress(addr) {
   if (!street?.trim())  return { valid: false, message: 'Street address is required.' };
   if (!city?.trim())    return { valid: false, message: 'City is required.' };
   if (!state?.trim())   return { valid: false, message: 'State is required.' };
-  if (!pincode?.toString().trim()) return { valid: false, message: 'Pincode is required.' };
+  const pinStr = pincode?.toString().trim();
+  if (!pinStr) return { valid: false, message: 'Pincode is required.' };
+  if (!/^[1-9][0-9]{5}$/.test(pinStr)) {
+    return { valid: false, message: 'Please enter a valid 6-digit Indian PIN code.' };
+  }
 
   return { valid: true };
 }
