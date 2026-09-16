@@ -1009,3 +1009,24 @@ exports.deleteTrackingHistoryItem = async (req, res) => {
   }
 };
 
+// @desc    Check pincode serviceability (Public)
+// @route   GET /api/orders/check-pincode/:pincode
+// @access  Public
+exports.checkPincodeServiceability = async (req, res) => {
+  try {
+    const { pincode } = req.params;
+    if (!pincode || !/^\d{6}$/.test(pincode)) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid 6-digit PIN code.' });
+    }
+
+    const result = await dtdcService.checkPincodeServiceability(pincode);
+    return res.status(200).json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    return serverError(res, error, 'orderController.js → checkPincodeServiceability');
+  }
+};
+
+
