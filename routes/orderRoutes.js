@@ -11,7 +11,10 @@ const {
   rejectCancellation,
   createShipment,
   trackOrder,
-  checkPincodeServiceability
+  checkPincodeServiceability,
+  deleteStatusHistoryItem,
+  bulkDeleteStatusHistory,
+  deleteTrackingHistoryItem
 } = require('../controllers/orderController');
 const { protect, admin } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
@@ -30,6 +33,11 @@ router.route('/:id')
   .get(protect, validateObjectId, getOrder);
 
 router.put('/:id/status', protect, admin, validateObjectId, updateOrderStatus);
+
+// History deletion routes (Admin)
+router.delete('/:id/history/:historyId', protect, admin, validateObjectId, deleteStatusHistoryItem);
+router.post('/:id/history/bulk-delete',  protect, admin, validateObjectId, bulkDeleteStatusHistory);
+router.delete('/:id/tracking/:trackingId', protect, admin, validateObjectId, deleteTrackingHistoryItem);
 
 // Cancellation flow
 router.put('/:id/cancel',          protect,        validateObjectId, cancelOrder);          // user

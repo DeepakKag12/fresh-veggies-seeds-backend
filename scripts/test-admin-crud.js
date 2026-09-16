@@ -150,6 +150,23 @@ async function runAdminCrudTests() {
   assert(ALLOWED_TRANSITIONS['Packed'].includes('Shipped'), 'Transition: Packed -> Shipped allowed');
   assert(ALLOWED_TRANSITIONS['Shipped'].includes('Delivered'), 'Transition: Shipped -> Delivered allowed');
 
+  // History deletion operations
+  assert(typeof orderController.deleteStatusHistoryItem === 'function', 'orderController: exports deleteStatusHistoryItem');
+  assert(typeof orderController.bulkDeleteStatusHistory === 'function', 'orderController: exports bulkDeleteStatusHistory');
+  assert(typeof orderController.deleteTrackingHistoryItem === 'function', 'orderController: exports deleteTrackingHistoryItem');
+
+  const delHistRes1 = createMockRes();
+  await orderController.deleteStatusHistoryItem({ params: { id: 'invalid-id', historyId: 'invalid-hid' } }, delHistRes1);
+  assert(delHistRes1.statusCode === 400, 'deleteStatusHistoryItem: rejects invalid ObjectId with 400');
+
+  const bulkHistRes1 = createMockRes();
+  await orderController.bulkDeleteStatusHistory({ params: { id: '64f1a2b3c4d5e6f7a8b9c0d1' }, body: { historyIds: [] } }, bulkHistRes1);
+  assert(bulkHistRes1.statusCode === 400, 'bulkDeleteStatusHistory: rejects empty historyIds array with 400');
+
+  const delTrackRes1 = createMockRes();
+  await orderController.deleteTrackingHistoryItem({ params: { id: 'invalid-id', trackingId: 'invalid-tid' } }, delTrackRes1);
+  assert(delTrackRes1.statusCode === 400, 'deleteTrackingHistoryItem: rejects invalid tracking ID with 400');
+
   // ─────────────────────────────────────────────────────────────
   // 7. USER ADMIN OPERATIONS & ROLE CONTROLS
   // ─────────────────────────────────────────────────────────────

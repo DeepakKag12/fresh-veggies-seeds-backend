@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const dtdcService = require('../services/dtdcService');
@@ -910,20 +911,101 @@ exports.trackOrder = async (req, res) => {
   }
 };
 
-// @desc    Check pincode serviceability
-// @route   GET /api/orders/check-pincode/:pincode
-// @access  Public
-exports.checkPincodeServiceability = async (req, res) => {
+// @desc    Delete single status history entry from an order (Admin)
+// @route   DELETE /api/orders/:id/history/:historyId
+// @access  Private/Admin
+exports.deleteStatusHistoryItem = async (req, res) => {
   try {
-    const { pincode } = req.params;
+    const { id, historyId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(historyId)) {
+      return res.status(400).json({ success: false, message: 'Invalid order or history ID format.' });
+    }
 
-    const result = await dtdcService.checkPincodeServiceability(pincode);
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
 
-    res.status(200).json({
+    const initialLen = order.statusHistory?.length || 0;
+    order.statusHistory = (order.statusHistory || []).filter(h => h._id?.toString() !== historyId);
+
+    if (order.statusHistory.length === initialLen) {
+      return res.status(404).json({ success: false, message: 'History entry not found.' });
+    }
+
+    await order.save();
+    return res.status(200).json({
       success: true,
-      data: result
+      message: 'Status history entry removed.',
+      data: order.statusHistory
     });
   } catch (error) {
-    return serverError(res, error, 'orderController.js → checkPincodeServiceability');
+    return serverError(res, error, 'orderController.js → deleteStatusHistoryItem');
   }
 };
+
+// @desc    Bulk delete status history entries from an order (Admin)
+// @route   POST /api/orders/:id/history/bulk-delete
+// @access  Private/Admin
+exports.bulkDeleteStatusHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { historyIds } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid order ID format.' });
+    }
+
+    if (!Array.isArray(historyIds) || historyIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'historyIds must be a non-empty array.' });
+    }
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    const idsSet = new Set(historyIds.map(String));
+    order.statusHistory = (order.statusHistory || []).filter(h => !idsSet.has(h._id?.toString()));
+
+    await order.save();
+    return res.status(200).json({
+      success: true,
+      message: `${historyIds.length} history item(s) removed.`,
+      data: order.statusHistory
+    });
+  } catch (error) {
+    return serverError(res, error, 'orderController.js → bulkDeleteStatusHistory');
+  }
+};
+
+// @desc    Delete tracking history entry (Admin)
+// @route   DELETE /api/orders/:id/tracking/:trackingId
+// @access  Private/Admin
+exports.deleteTrackingHistoryItem = async (req, res) => {
+  try {
+    const { id, trackingId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(trackingId)) {
+      return res.status(400).json({ success: false, message: 'Invalid order or tracking ID format.' });
+    }
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    if (order.shipping?.trackingHistory) {
+      order.shipping.trackingHistory = order.shipping.trackingHistory.filter(t => t._id?.toString() !== trackingId);
+      await order.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Tracking history entry removed.',
+      data: order.shipping?.trackingHistory || []
+    });
+  } catch (error) {
+    return serverError(res, error, 'orderController.js → deleteTrackingHistoryItem');
+  }
+};
+
