@@ -307,166 +307,497 @@ exports.deleteUser = async (req, res) => {
   }
 };
 
-// @desc    Get sales analytics
+// ─── Helper: Build standard date range ────────────────────────────────────────
+const getDateRange = (period = '30days', year, month) => {
+  let startDate, endDate = new Date();
+  const now = new Date();
+
+  if (period === '7days') {
+    startDate = new Date(); startDate.setDate(startDate.getDate() - 7);
+  } else if (period === '30days') {
+    startDate = new Date(); startDate.setDate(startDate.getDate() - 30);
+  } else if (period === '90days') {
+    startDate = new Date(); startDate.setDate(startDate.getDate() - 90);
+  } else if (period === 'thismonth') {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+  } else if (period === 'lastmonth') {
+    startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    endDate   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+  } else if (period === 'specificmonth' && year && month) {
+    const y = parseInt(year), m = parseInt(month) - 1;
+    startDate = new Date(y, m, 1);
+    endDate   = new Date(y, m + 1, 0, 23, 59, 59);
+  } else if (period === 'yearly') {
+    startDate = new Date(now.getFullYear(), 0, 1);
+  } else {
+    startDate = new Date(); startDate.setDate(startDate.getDate() - 30);
+  }
+
+  return { startDate, endDate };
+};
+
+// @desc    Get dedicated revenue dashboard data (financial metrics, payouts, ledger)
+// @route   GET /api/admin/revenue
+// @access  Private/Admin
+exports.getRevenueOverview = async (req, res) => {
+  try {
+    const { period = '30days', year, month } = req.query;
+    const cacheKey = `admin:revenue:${period}:${year || ''}:${month || ''}`;
+
+    const data = await statsCache.remember(cacheKey, 300_000, async () => {
+      const { startDate, endDate } = getDateRange(period, year, month);
+      const now = new Date();
+      const baseMatch = { paymentStatus: 'Paid', createdAt: { $gte: startDate, $lte: endDate } };
+      const periodOrderMatch = { createdAt: { $gte: startDate, $lte: endDate } };
+
+      const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+
+      // Run all aggregation queries in parallel
+      const [
+        financialAgg,
+        dailyRevenue,
+        monthlyRevenue,
+        paymentSplit,
+        categoryRevenue,
+        topCustomers,
+        recentTransactions
+      ] = await Promise.all([
+        // 1. Core Financial KPI Aggregation
+        Order.aggregate([
+          { $match: periodOrderMatch },
+          {
+            $group: {
+              _id: null,
+              grossRevenue: {
+                $sum: { $cond: [{ $eq: ['$paymentStatus', 'Paid'] }, '$totalAmount', 0] }
+              },
+              onlineRevenue: {
+                $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'Online'] }] }, '$totalAmount', 0] }
+              },
+              codRevenue: {
+                $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Paid'] }, { $eq: ['$paymentMode', 'COD'] }] }, '$totalAmount', 0] }
+              },
+              refundedAmount: {
+                $sum: { $cond: [{ $eq: ['$paymentStatus', 'Refunded'] }, '$totalAmount', { $ifNull: ['$refund.refundAmount', 0] }] }
+              },
+              paidOrdersCount: {
+                $sum: { $cond: [{ $eq: ['$paymentStatus', 'Paid'] }, 1, 0] }
+              },
+              refundedOrdersCount: {
+                $sum: { $cond: [{ $eq: ['$paymentStatus', 'Refunded'] }, 1, { $cond: [{ $gt: [{ $ifNull: ['$refund.refundAmount', 0] }, 0] }, 1, 0] }] }
+              }
+            }
+          }
+        ]),
+
+        // 2. Daily Revenue Trend (Indexed on { paymentStatus: 1, createdAt: -1 })
+        Order.aggregate([
+          { $match: baseMatch },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+              revenue:       { $sum: '$totalAmount' },
+              onlineRevenue: { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, '$totalAmount', 0] } },
+              codRevenue:    { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, '$totalAmount', 0] } },
+              orders:        { $sum: 1 },
+              onlineOrders:  { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, 1, 0] } },
+              codOrders:     { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, 1, 0] } },
+            }
+          },
+          { $sort: { _id: 1 } }
+        ]),
+
+        // 3. 12-Month Revenue Summary (For yearly comparisons)
+        Order.aggregate([
+          { $match: { paymentStatus: 'Paid', createdAt: { $gte: twelveMonthsAgo } } },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m', date: '$createdAt' } },
+              revenue:       { $sum: '$totalAmount' },
+              onlineRevenue: { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, '$totalAmount', 0] } },
+              codRevenue:    { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, '$totalAmount', 0] } },
+              orders:        { $sum: 1 }
+            }
+          },
+          { $sort: { _id: 1 } }
+        ]),
+
+        // 4. Payment Split Breakdown
+        Order.aggregate([
+          { $match: baseMatch },
+          {
+            $group: {
+              _id: '$paymentMode',
+              revenue:       { $sum: '$totalAmount' },
+              orders:        { $sum: 1 },
+              avgOrderValue: { $avg: '$totalAmount' }
+            }
+          }
+        ]),
+
+        // 5. Category Revenue & Profitability
+        Order.aggregate([
+          { $match: baseMatch },
+          { $unwind: '$orderItems' },
+          {
+            $lookup: {
+              from: 'products',
+              localField: 'orderItems.product',
+              foreignField: '_id',
+              as: 'product'
+            }
+          },
+          { $unwind: '$product' },
+          {
+            $lookup: {
+              from: 'categories',
+              localField: 'product.categoryId',
+              foreignField: '_id',
+              as: 'category'
+            }
+          },
+          { $unwind: '$category' },
+          {
+            $group: {
+              _id: '$category.name',
+              revenue: { $sum: { $multiply: ['$orderItems.price', '$orderItems.quantity'] } },
+              orders:  { $sum: 1 }
+            }
+          },
+          { $sort: { revenue: -1 } }
+        ]),
+
+        // 6. Top Customers by Revenue (Indexed on userId + paymentStatus)
+        Order.aggregate([
+          { $match: baseMatch },
+          {
+            $group: {
+              _id: '$userId',
+              totalSpent: { $sum: '$totalAmount' },
+              orderCount: { $sum: 1 }
+            }
+          },
+          { $sort: { totalSpent: -1 } },
+          { $limit: 8 },
+          {
+            $lookup: {
+              from: 'users',
+              localField: '_id',
+              foreignField: '_id',
+              as: 'user'
+            }
+          },
+          { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+          {
+            $project: {
+              _id: 1,
+              name: { $ifNull: ['$user.name', 'Guest Customer'] },
+              email: { $ifNull: ['$user.email', 'N/A'] },
+              phone: { $ifNull: ['$user.phone', ''] },
+              totalSpent: 1,
+              orderCount: 1
+            }
+          }
+        ]),
+
+        // 7. Recent Financial Transactions Ledger (Projections for slimming payload)
+        Order.find({ paymentStatus: { $in: ['Paid', 'Refunded'] }, createdAt: { $gte: startDate, $lte: endDate } })
+          .select('_id orderNumber userId totalAmount paymentMode paymentStatus refund createdAt')
+          .populate('userId', 'name email phone')
+          .sort({ createdAt: -1 })
+          .limit(20)
+          .lean()
+      ]);
+
+      const fin = financialAgg[0] || {};
+      const grossRevenue = fin.grossRevenue || 0;
+      const onlineRevenue = fin.onlineRevenue || 0;
+      const codRevenue = fin.codRevenue || 0;
+      const refundedAmount = fin.refundedAmount || 0;
+      const paidOrdersCount = fin.paidOrdersCount || 0;
+      const refundedOrdersCount = fin.refundedOrdersCount || 0;
+
+      // Estimated Payment Gateway processing fee (~2% on Online/UPI payments)
+      const estimatedGatewayFees = Math.round(onlineRevenue * 0.02);
+      const netRevenue = Math.max(0, grossRevenue - refundedAmount - estimatedGatewayFees);
+      const avgOrderValue = paidOrdersCount > 0 ? Math.round(grossRevenue / paidOrdersCount) : 0;
+
+      // Transform ledger items
+      const ledger = (recentTransactions || []).map((t) => {
+        const isOnline = t.paymentMode === 'Online';
+        const fee = isOnline && t.paymentStatus === 'Paid' ? Math.round(t.totalAmount * 0.02) : 0;
+        const net = t.paymentStatus === 'Refunded' ? 0 : Math.max(0, t.totalAmount - fee);
+        return {
+          _id: t._id,
+          orderNumber: t.orderNumber,
+          customerName: t.userId?.name || 'Customer',
+          customerEmail: t.userId?.email || '',
+          customerPhone: t.userId?.phone || '',
+          date: t.createdAt,
+          paymentMode: t.paymentMode,
+          paymentStatus: t.paymentStatus,
+          grossAmount: t.totalAmount,
+          gatewayFee: fee,
+          netAmount: net,
+          refundStatus: t.refund?.refundStatus || (t.paymentStatus === 'Refunded' ? 'Processed' : null)
+        };
+      });
+
+      return {
+        period,
+        kpis: {
+          grossRevenue,
+          netRevenue,
+          onlineRevenue,
+          codRevenue,
+          refundedAmount,
+          estimatedGatewayFees,
+          avgOrderValue,
+          paidOrdersCount,
+          refundedOrdersCount
+        },
+        dailyRevenue,
+        monthlyRevenue,
+        paymentSplit,
+        categoryRevenue,
+        topCustomers,
+        recentTransactions: ledger
+      };
+    });
+
+    res.set('Cache-Control', 'private, max-age=60');
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return serverError(res, error, 'adminController.js → getRevenueOverview');
+  }
+};
+
+// @desc    Get user behavior, operations & product velocity analytics
 // @route   GET /api/admin/analytics
 // @access  Private/Admin
 exports.getSalesAnalytics = async (req, res) => {
   try {
     const { period = '30days', year, month } = req.query;
+    const cacheKey = `admin:analytics:${period}:${year || ''}:${month || ''}`;
 
-    // ── Build date range ──────────────────────────────────────────────────────
-    let startDate, endDate = new Date();
-    const now = new Date();
+    const data = await statsCache.remember(cacheKey, 600_000, async () => {
+      const { startDate, endDate } = getDateRange(period, year, month);
+      const now = new Date();
+      const baseMatch = { paymentStatus: 'Paid', createdAt: { $gte: startDate, $lte: endDate } };
+      const periodMatch = { createdAt: { $gte: startDate, $lte: endDate } };
+      const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
 
-    if (period === '7days') {
-      startDate = new Date(); startDate.setDate(startDate.getDate() - 7);
-    } else if (period === '30days') {
-      startDate = new Date(); startDate.setDate(startDate.getDate() - 30);
-    } else if (period === '90days') {
-      startDate = new Date(); startDate.setDate(startDate.getDate() - 90);
-    } else if (period === 'thismonth') {
-      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-    } else if (period === 'lastmonth') {
-      startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      endDate   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
-    } else if (period === 'specificmonth' && year && month) {
-      // ?period=specificmonth&year=2026&month=2  (1-based month)
-      const y = parseInt(year), m = parseInt(month) - 1;
-      startDate = new Date(y, m, 1);
-      endDate   = new Date(y, m + 1, 0, 23, 59, 59);
-    } else if (period === 'yearly') {
-      startDate = new Date(now.getFullYear(), 0, 1);
-    } else {
-      startDate = new Date(); startDate.setDate(startDate.getDate() - 30);
-    }
+      // Run all aggregation pipelines concurrently
+      const [
+        dailyRevenue,
+        monthlyRevenue,
+        paymentSplit,
+        topProducts,
+        categoryRevenue,
+        fulfillmentFunnel,
+        hourlyDistribution,
+        geographicDistribution,
+        lowStockRisk
+      ] = await Promise.all([
+        // 1. Daily revenue trend
+        Order.aggregate([
+          { $match: baseMatch },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+              revenue:       { $sum: '$totalAmount' },
+              onlineRevenue: { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, '$totalAmount', 0] } },
+              codRevenue:    { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, '$totalAmount', 0] } },
+              orders:        { $sum: 1 },
+              onlineOrders:  { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, 1, 0] } },
+              codOrders:     { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, 1, 0] } },
+            }
+          },
+          { $sort: { _id: 1 } }
+        ]),
 
-    const baseMatch = { paymentStatus: 'Paid', createdAt: { $gte: startDate, $lte: endDate } };
+        // 2. 12-month trend
+        Order.aggregate([
+          { $match: { paymentStatus: 'Paid', createdAt: { $gte: twelveMonthsAgo } } },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m', date: '$createdAt' } },
+              revenue:       { $sum: '$totalAmount' },
+              onlineRevenue: { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, '$totalAmount', 0] } },
+              codRevenue:    { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, '$totalAmount', 0] } },
+              orders:        { $sum: 1 }
+            }
+          },
+          { $sort: { _id: 1 } }
+        ]),
 
-    // ── Daily/Monthly revenue with Online vs COD split ────────────────────────
-    const groupByFormat = (period === 'yearly' || period === 'specificmonth' && false)
-      ? '%Y-%m-%d'
-      : period === 'yearly' ? '%Y-%m' : '%Y-%m-%d';
+        // 3. Payment split
+        Order.aggregate([
+          { $match: baseMatch },
+          {
+            $group: {
+              _id: '$paymentMode',
+              revenue:       { $sum: '$totalAmount' },
+              orders:        { $sum: 1 },
+              avgOrderValue: { $avg: '$totalAmount' }
+            }
+          }
+        ]),
 
-    const dailyRevenue = await Order.aggregate([
-      { $match: baseMatch },
-      {
-        $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-          revenue:       { $sum: '$totalAmount' },
-          onlineRevenue: { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, '$totalAmount', 0] } },
-          codRevenue:    { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, '$totalAmount', 0] } },
-          orders:        { $sum: 1 },
-          onlineOrders:  { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, 1, 0] } },
-          codOrders:     { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, 1, 0] } },
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
+        // 4. Top selling products with lean projection
+        Order.aggregate([
+          { $match: baseMatch },
+          { $unwind: '$orderItems' },
+          {
+            $group: {
+              _id: '$orderItems.product',
+              totalSold: { $sum: '$orderItems.quantity' },
+              revenue:   { $sum: { $multiply: ['$orderItems.price', '$orderItems.quantity'] } }
+            }
+          },
+          { $sort: { revenue: -1 } },
+          { $limit: 10 },
+          {
+            $lookup: {
+              from: 'products',
+              localField: '_id',
+              foreignField: '_id',
+              as: 'productDoc'
+            }
+          },
+          { $unwind: { path: '$productDoc', preserveNullAndEmptyArrays: false } },
+          {
+            $project: {
+              _id: 1,
+              name: '$productDoc.name',
+              stock: '$productDoc.stock',
+              totalSold: 1,
+              revenue: 1
+            }
+          }
+        ]),
 
-    // ── Last 12 months summary (always returned for the monthly bar chart) ───
-    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-    const monthlyRevenue = await Order.aggregate([
-      { $match: { paymentStatus: 'Paid', createdAt: { $gte: twelveMonthsAgo } } },
-      {
-        $group: {
-          _id: { $dateToString: { format: '%Y-%m', date: '$createdAt' } },
-          revenue:       { $sum: '$totalAmount' },
-          onlineRevenue: { $sum: { $cond: [{ $eq: ['$paymentMode', 'Online'] }, '$totalAmount', 0] } },
-          codRevenue:    { $sum: { $cond: [{ $eq: ['$paymentMode', 'COD']    }, '$totalAmount', 0] } },
-          orders:        { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]);
+        // 5. Category distribution
+        Order.aggregate([
+          { $match: baseMatch },
+          { $unwind: '$orderItems' },
+          {
+            $lookup: {
+              from: 'products',
+              localField: 'orderItems.product',
+              foreignField: '_id',
+              as: 'product'
+            }
+          },
+          { $unwind: '$product' },
+          {
+            $lookup: {
+              from: 'categories',
+              localField: 'product.categoryId',
+              foreignField: '_id',
+              as: 'category'
+            }
+          },
+          { $unwind: '$category' },
+          {
+            $group: {
+              _id: '$category.name',
+              revenue: { $sum: { $multiply: ['$orderItems.price', '$orderItems.quantity'] } },
+              orders:  { $sum: 1 }
+            }
+          },
+          { $sort: { revenue: -1 } }
+        ]),
 
-    // ── Payment mode totals for selected period ───────────────────────────────
-    const paymentSplit = await Order.aggregate([
-      { $match: baseMatch },
-      {
-        $group: {
-          _id: '$paymentMode',
-          revenue:  { $sum: '$totalAmount' },
-          orders:   { $sum: 1 },
-          avgOrderValue: { $avg: '$totalAmount' }
-        }
-      }
-    ]);
+        // 6. Order Fulfillment Funnel & Conversion Rates
+        Order.aggregate([
+          { $match: periodMatch },
+          {
+            $group: {
+              _id: '$orderStatus',
+              count: { $sum: 1 },
+              totalVolume: { $sum: '$totalAmount' }
+            }
+          }
+        ]),
 
-    // ── Top selling products ──────────────────────────────────────────────────
-    const topProducts = await Order.aggregate([
-      { $match: baseMatch },
-      { $unwind: '$orderItems' },
-      {
-        $group: {
-          _id: '$orderItems.product',
-          totalSold: { $sum: '$orderItems.quantity' },
-          revenue:   { $sum: { $multiply: ['$orderItems.price', '$orderItems.quantity'] } }
-        }
-      },
-      { $sort: { revenue: -1 } },
-      { $limit: 10 },
-      {
-        $lookup: {
-          from: 'products',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'productDoc'
-        }
-      },
-      { $unwind: { path: '$productDoc', preserveNullAndEmptyArrays: false } },
-      {
-        $project: {
-          _id: 1,
-          name: '$productDoc.name',
-          totalSold: 1,
-          revenue: 1
-        }
-      }
-    ]);
+        // 7. Peak Shopping / Ordering Hours Heatmap (Hour 0 to 23)
+        Order.aggregate([
+          { $match: periodMatch },
+          {
+            $group: {
+              _id: { $hour: { date: '$createdAt', timezone: '+05:30' } },
+              orderCount: { $sum: 1 },
+              volume: { $sum: '$totalAmount' }
+            }
+          },
+          { $sort: { _id: 1 } }
+        ]),
 
-    // Revenue by category — only from paid orders
-    const categoryRevenue = await Order.aggregate([
-      { $match: baseMatch },
-      { $unwind: '$orderItems' },
-      {
-        $lookup: {
-          from: 'products',
-          localField: 'orderItems.product',
-          foreignField: '_id',
-          as: 'product'
-        }
-      },
-      { $unwind: '$product' },
-      {
-        $lookup: {
-          from: 'categories',
-          localField: 'product.categoryId',
-          foreignField: '_id',
-          as: 'category'
-        }
-      },
-      { $unwind: '$category' },
-      {
-        $group: {
-          _id: '$category.name',
-          revenue: { $sum: { $multiply: ['$orderItems.price', '$orderItems.quantity'] } },
-          orders:  { $sum: 1 }
-        }
-      },
-      { $sort: { revenue: -1 } }
-    ]);
+        // 8. Geographical Distribution (Top States across India)
+        Order.aggregate([
+          { $match: { ...baseMatch, 'shippingAddress.state': { $exists: true, $ne: '' } } },
+          {
+            $group: {
+              _id: '$shippingAddress.state',
+              orderCount: { $sum: 1 },
+              revenue: { $sum: '$totalAmount' }
+            }
+          },
+          { $sort: { revenue: -1 } },
+          { $limit: 10 }
+        ]),
 
-    res.status(200).json({
-      success: true,
-      data: {
+        // 9. Stock Depletion & Velocity Risk Check
+        Product.find({ isActive: true, stock: { $lte: 15 } })
+          .select('name stock price categoryId images')
+          .populate('categoryId', 'name')
+          .sort({ stock: 1 })
+          .limit(8)
+          .lean()
+      ]);
+
+      // Calculate funnel summary
+      let totalAllOrders = 0;
+      let deliveredOrders = 0;
+      let cancelledOrders = 0;
+      let inTransitOrders = 0;
+
+      (fulfillmentFunnel || []).forEach((f) => {
+        totalAllOrders += f.count;
+        if (f._id === 'Delivered') deliveredOrders += f.count;
+        else if (f._id === 'Cancelled' || f._id === 'CancellationRequested') cancelledOrders += f.count;
+        else inTransitOrders += f.count;
+      });
+
+      const fulfillmentRate = totalAllOrders > 0 ? Math.round((deliveredOrders / totalAllOrders) * 100) : 0;
+      const cancellationRate = totalAllOrders > 0 ? Math.round((cancelledOrders / totalAllOrders) * 100) : 0;
+
+      return {
         period,
         dailyRevenue,
         monthlyRevenue,
         paymentSplit,
         topProducts,
-        categoryRevenue
-      }
+        categoryRevenue,
+        // Behavioral & Operational Metrics
+        operational: {
+          totalOrders: totalAllOrders,
+          deliveredOrders,
+          cancelledOrders,
+          inTransitOrders,
+          fulfillmentRate,
+          cancellationRate,
+          fulfillmentFunnel,
+          hourlyDistribution,
+          geographicDistribution,
+          lowStockRisk
+        }
+      };
     });
+
+    res.set('Cache-Control', 'private, max-age=60');
+    return res.status(200).json({ success: true, data });
   } catch (error) {
     return serverError(res, error, 'adminController.js → getSalesAnalytics');
   }

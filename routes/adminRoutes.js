@@ -5,6 +5,7 @@ const {
   getAllUsers,
   updateUserRole,
   deleteUser,
+  getRevenueOverview,
   getSalesAnalytics,
   getLowStockProducts
 } = require('../controllers/adminController');
@@ -13,6 +14,7 @@ const { protect, admin } = require('../middleware/auth');
 const validateObjectId = require('../middleware/validateObjectId');
 
 router.get('/stats',     protect, admin, getDashboardStats);
+router.get('/revenue',   protect, admin, getRevenueOverview);
 router.get('/analytics', protect, admin, getSalesAnalytics);
 router.get('/lowstock',  protect, admin, getLowStockProducts);
 router.get('/users',     protect, admin, getAllUsers);

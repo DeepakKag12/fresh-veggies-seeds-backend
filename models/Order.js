@@ -209,12 +209,17 @@ orderSchema.pre('validate', async function (next) {
 // Mirror the real query shapes: a customer's order list, the admin list filtered
 // by status, and the payment lookups done by verify + webhook.
 orderSchema.index({ userId: 1, createdAt: -1 });
+orderSchema.index({ userId: 1, paymentStatus: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1, createdAt: -1 });
 orderSchema.index({ orderStatus: 1, paymentMode: 1, createdAt: -1 });
 orderSchema.index({ paymentStatus: 1, createdAt: -1 });
+orderSchema.index({ paymentStatus: 1, paymentMode: 1, createdAt: -1 });
 orderSchema.index({ createdAt: -1 });
 orderSchema.index({ 'paymentDetails.razorpayOrderId': 1 });
 orderSchema.index({ 'paymentDetails.razorpayPaymentId': 1 });
 orderSchema.index({ paymentMode: 1, paymentStatus: 1, createdAt: -1 });
+orderSchema.index({ 'orderItems.product': 1, paymentStatus: 1 });
+orderSchema.index({ 'shippingAddress.state': 1, paymentStatus: 1 });
+orderSchema.index({ 'refund.refundStatus': 1, createdAt: -1 });
 
 module.exports = mongoose.model('Order', orderSchema);
