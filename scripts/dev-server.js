@@ -32,7 +32,7 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 
   console.log('🌱 Seeding…');
   try {
-    execFileSync('node', [path.join(__dirname, '..', 'seedData.js')], {
+    execFileSync('node', [path.join(__dirname, '..', 'src', 'seedData.js')], {
       env, cwd: path.join(__dirname, '..'), stdio: 'inherit',
     });
   } catch {
@@ -40,7 +40,7 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
   }
 
   Object.assign(process.env, env);
-  require(path.join(__dirname, '..', 'server.js'));
+  require(path.join(__dirname, '..', 'src', 'server.js'));
 
   const shutdown = async () => { await mongod.stop(); process.exit(0); };
   process.on('SIGINT', shutdown);

@@ -50,7 +50,7 @@ async function runAdminCrudTests() {
   // 1. PRODUCT CRUD & INVENTORY OPERATIONS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('▶ 1. Product Admin Operations & CRUD')));
-  const productController = require('../controllers/productController');
+  const productController = require('../src/controllers/product.controller');
 
   // getProduct: rejects invalid ObjectId format
   const getProdRes1 = createMockRes();
@@ -69,7 +69,7 @@ async function runAdminCrudTests() {
   // 2. CATEGORY CRUD & OPERATIONS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 2. Category Admin CRUD Operations')));
-  const categoryController = require('../controllers/categoryController');
+  const categoryController = require('../src/controllers/category.controller');
 
   assert(typeof categoryController.getCategories === 'function', 'categoryController: exports getCategories');
   assert(typeof categoryController.getCategory === 'function', 'categoryController: exports getCategory');
@@ -85,7 +85,7 @@ async function runAdminCrudTests() {
   // 3. COMBO CRUD & OPERATIONS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 3. Combo Admin CRUD Operations')));
-  const comboController = require('../controllers/comboController');
+  const comboController = require('../src/controllers/combo.controller');
 
   assert(typeof comboController.getCombos === 'function', 'comboController: exports getCombos');
   assert(typeof comboController.getCombo === 'function', 'comboController: exports getCombo');
@@ -97,7 +97,7 @@ async function runAdminCrudTests() {
   // 4. COUPON CRUD & DISCOUNT OPERATIONS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 4. Coupon Admin CRUD & Validations')));
-  const couponController = require('../controllers/couponController');
+  const couponController = require('../src/controllers/coupon.controller');
 
   assert(typeof couponController.getAllCoupons === 'function', 'couponController: exports getAllCoupons');
   assert(typeof couponController.getActiveCoupons === 'function', 'couponController: exports getActiveCoupons');
@@ -114,7 +114,7 @@ async function runAdminCrudTests() {
   // 5. BANNER CRUD & OPERATIONS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 5. Banner Admin CRUD Operations')));
-  const bannerController = require('../controllers/bannerController');
+  const bannerController = require('../src/controllers/banner.controller');
 
   assert(typeof bannerController.getAllBanners === 'function', 'bannerController: exports getAllBanners');
   assert(typeof bannerController.getActiveBanners === 'function', 'bannerController: exports getActiveBanners');
@@ -127,8 +127,8 @@ async function runAdminCrudTests() {
   // 6. ORDER ADMIN OPERATIONS & STATUS TRANSITIONS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 6. Order Admin Operations & Status Transitions')));
-  const orderController = require('../controllers/orderController');
-  const { ALL_ORDER_STATUSES, ALLOWED_TRANSITIONS } = require('../config/orderConfig');
+  const orderController = require('../src/controllers/order.controller');
+  const { ALL_ORDER_STATUSES, ALLOWED_TRANSITIONS } = require('../src/config/order.config');
 
   // Valid statuses
   assert(ALL_ORDER_STATUSES.includes('Pending'), 'Order statuses includes "Pending"');
@@ -171,7 +171,7 @@ async function runAdminCrudTests() {
   // 7. USER ADMIN OPERATIONS & ROLE CONTROLS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 7. User Admin Operations & Role Guards')));
-  const adminController = require('../controllers/adminController');
+  const adminController = require('../src/controllers/admin.controller');
 
   // updateUserRole: rejects invalid roles
   const roleRes1 = createMockRes();
@@ -192,7 +192,7 @@ async function runAdminCrudTests() {
   // 8. REVIEW ADMIN OPERATIONS & MODERATION
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 8. Review Admin Operations & Moderation')));
-  const reviewController = require('../controllers/reviewController');
+  const reviewController = require('../src/controllers/review.controller');
 
   // approveReview: requires strict boolean isApproved
   const appRes1 = createMockRes();
@@ -208,7 +208,7 @@ async function runAdminCrudTests() {
   // 9. SETTINGS ADMIN CONTROLS & SECTIONS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 9. Settings Admin Controls & Store Configuration')));
-  const settingsController = require('../controllers/settingsController');
+  const settingsController = require('../src/controllers/settings.controller');
 
   // updateSettingsSection: rejects invalid section name
   const setRes1 = createMockRes();
@@ -228,7 +228,7 @@ async function runAdminCrudTests() {
   // 10. DANGER ZONE & DATA PURGE SECURITY GATES
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ 10. Admin Danger Zone & Data Purge Security Controls')));
-  const dataPurgeController = require('../controllers/dataPurgeController');
+  const dataPurgeController = require('../src/controllers/data-purge.controller');
 
   // previewPurge: checks super admin email protection
   const previewRes1 = createMockRes();

@@ -4,10 +4,10 @@ const path = require('path');
 
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
-const User = require('../models/User');
-const msg91Service = require('../services/msg91Service');
-const emailService = require('../services/emailService');
-const orderNotificationService = require('../services/orderNotificationService');
+const User = require('../src/models/user.model');
+const msg91Service = require('../src/services/msg91.service');
+const emailService = require('../src/services/email.service');
+const orderNotificationService = require('../src/services/order-notification.service');
 
 async function runTests() {
   console.log('🧪 ─── STARTING INTEGRATION TESTS ───');
@@ -62,7 +62,7 @@ async function runTests() {
 
   // 5. Testing Shipping Address Validation Helper
   console.log('\n5. Testing Shipping Address Validation:');
-  const { validateShippingAddress } = require('../utils/orderValidation');
+  const { validateShippingAddress } = require('../src/validators/order.validator');
   const validAddr = {
     name: 'Verified Customer',
     phone: '9876543210',
@@ -80,7 +80,7 @@ async function runTests() {
 
   // 6. Testing Review Controller Parameter Validation
   console.log('\n6. Testing Review Controller Id Validation:');
-  const reviewController = require('../controllers/reviewController');
+  const reviewController = require('../src/controllers/review.controller');
   console.log('   getProductReviews exists:', typeof reviewController.getProductReviews === 'function');
   const mockRes = {
     status(code) { this.statusCode = code; return this; },

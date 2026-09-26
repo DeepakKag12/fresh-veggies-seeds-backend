@@ -40,8 +40,8 @@ async function runAllSuites() {
   // SUITE 1: PIN CODE & ADDRESS VALIDATION
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('▶ SUITE 1: PIN Code & Address Validation')));
-  const { validateShippingAddress, validateOrderItems } = require('../utils/orderValidation');
-  const { isValidPhone, isValidEmail, validatePassword } = require('../utils/validators');
+  const { validateShippingAddress, validateOrderItems } = require('../src/validators/order.validator');
+  const { isValidPhone, isValidEmail, validatePassword } = require('../src/validators/auth.validator');
 
   // Valid 6-digit Indian PIN codes
   assert(validateShippingAddress({
@@ -162,7 +162,7 @@ async function runAllSuites() {
   // SUITE 3: PRICING, SHIPPING RULES & DISCOUNTS
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ SUITE 3: Pricing Rules & Delivery Calculations')));
-  const { computeShippingPrice, computeOnlineDiscount } = require('../config/orderConfig');
+  const { computeShippingPrice, computeOnlineDiscount } = require('../src/config/order.config');
 
   // Delivery Threshold Calculation
   assert(computeShippingPrice(350, 300, 50) === 0, 'Free delivery applied when subtotal (₹350) >= threshold (₹300)');

@@ -14,9 +14,9 @@
  */
 require('dotenv').config();
 const mongoose = require('mongoose');
-const Category = require('../models/Category');
-const Product = require('../models/Product');
-const Combo = require('../models/Combo');
+const Category = require('../src/models/category.model');
+const Product = require('../src/models/product.model');
+const Combo = require('../src/models/combo.model');
 
 const KEEP = process.argv.includes('--keep');
 

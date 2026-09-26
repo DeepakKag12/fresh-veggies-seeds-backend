@@ -50,7 +50,7 @@ async function runControllerTests() {
   // SUITE 1: AUTH CONTROLLER VALIDATION
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('▶ SUITE 1: Auth Controller Request Validations')));
-  const authController = require('../controllers/authController');
+  const authController = require('../src/controllers/auth.controller');
 
   const mockValidPass = ['Mock', 'Pass', '123'].join('');
 
@@ -106,8 +106,8 @@ async function runControllerTests() {
   // SUITE 2: ORDER & PAYMENT CONTROLLER VALIDATION
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ SUITE 2: Order & Payment Controller Validations')));
-  const orderController = require('../controllers/orderController');
-  const paymentController = require('../controllers/paymentController');
+  const orderController = require('../src/controllers/order.controller');
+  const paymentController = require('../src/controllers/payment.controller');
 
   // 1. Create order with empty items
   const orderRes1 = createMockRes();
@@ -133,7 +133,7 @@ async function runControllerTests() {
   // SUITE 3: REVIEW CONTROLLER VALIDATION
   // ─────────────────────────────────────────────────────────────
   console.log(cyan(bold('\n▶ SUITE 3: Review Controller Validations')));
-  const reviewController = require('../controllers/reviewController');
+  const reviewController = require('../src/controllers/review.controller');
 
   // 1. Get reviews with malformed ObjectId
   const revRes1 = createMockRes();

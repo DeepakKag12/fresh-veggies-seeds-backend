@@ -8,7 +8,7 @@ async function testRoutes() {
   console.log('🧪 ─── STARTING FRONTEND-BACKEND ROUTE CONNECTIVITY AUDIT ───\n');
 
   // Load the running server
-  require('../server');
+  require('../src/server');
 
   // Give server 1.5s to bind port and connect DB
   await new Promise((r) => setTimeout(r, 1500));

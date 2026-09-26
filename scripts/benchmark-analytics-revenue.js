@@ -13,9 +13,9 @@ const path = require('path');
 
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
-const cacheService = require('../utils/cacheService');
-const Order = require('../models/Order');
-const User = require('../models/User');
+const cacheService = require('../src/utils/cache.util');
+const Order = require('../src/models/order.model');
+const User = require('../src/models/user.model');
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/freshveggies';
 
