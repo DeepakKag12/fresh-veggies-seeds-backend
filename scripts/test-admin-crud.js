@@ -241,6 +241,32 @@ async function runAdminCrudTests() {
   assert(purgeRes1.statusCode === 403, 'purgeData: blocks non-super-admin with 403 Forbidden');
 
   // ─────────────────────────────────────────────────────────────
+  // 11. CONTACT INQUIRY VALIDATIONS & ADMIN STATUS
+  // ─────────────────────────────────────────────────────────────
+  console.log(cyan(bold('\n▶ 11. Contact Inquiry Validations & Admin Status Controls')));
+  const contactController = require('../src/controllers/contact.controller');
+
+  // submitContactInquiry: rejects short name
+  const cRes1 = createMockRes();
+  await contactController.submitContactInquiry({ body: { name: 'A', email: 'valid@example.com', message: 'Valid message here' } }, cRes1);
+  assert(cRes1.statusCode === 400, 'submitContactInquiry: rejects short name with 400');
+
+  // submitContactInquiry: rejects invalid email
+  const cRes2 = createMockRes();
+  await contactController.submitContactInquiry({ body: { name: 'Valid Name', email: 'invalid-email', message: 'Valid message here' } }, cRes2);
+  assert(cRes2.statusCode === 400, 'submitContactInquiry: rejects invalid email with 400');
+
+  // submitContactInquiry: rejects short message
+  const cRes3 = createMockRes();
+  await contactController.submitContactInquiry({ body: { name: 'Valid Name', email: 'valid@example.com', message: 'short' } }, cRes3);
+  assert(cRes3.statusCode === 400, 'submitContactInquiry: rejects short message (<10 chars) with 400');
+
+  // updateInquiryStatus: rejects invalid status
+  const cRes4 = createMockRes();
+  await contactController.updateInquiryStatus({ params: { id: 'some-id' }, body: { status: 'invalid_status' } }, cRes4);
+  assert(cRes4.statusCode === 400, 'updateInquiryStatus: rejects invalid status string with 400');
+
+  // ─────────────────────────────────────────────────────────────
   // SUMMARY
   // ─────────────────────────────────────────────────────────────
   console.log(bold('\n═══════════════════════════════════════════════════════════════'));

@@ -13,6 +13,7 @@ const couponRoutes = require('../src/routes/coupon.routes');
 const reviewRoutes = require('../src/routes/review.routes');
 const bannerRoutes = require('../src/routes/banner.routes');
 const settingsRoutes = require('../src/routes/settings.routes');
+const contactRoutes = require('../src/routes/contact.routes');
 
 const mounted = [
   { prefix: '/api/auth', router: authRoutes },
@@ -27,6 +28,7 @@ const mounted = [
   { prefix: '/api/reviews', router: reviewRoutes },
   { prefix: '/api/banners', router: bannerRoutes },
   { prefix: '/api/settings', router: settingsRoutes },
+  { prefix: '/api/contact', router: contactRoutes },
 ];
 
 const registeredRoutes = [];
