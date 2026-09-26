@@ -175,6 +175,7 @@ exports.createProduct = async (req, res) => {
 
     cacheService.invalidate('products:');
     cacheService.invalidate('combos:');
+    cacheService.invalidate('categories:');
     cacheService.invalidate('admin:');
 
     res.status(201).json({
@@ -209,6 +210,7 @@ exports.updateProduct = async (req, res) => {
 
     cacheService.invalidate('products:');
     cacheService.invalidate('combos:');
+    cacheService.invalidate('categories:');
     cacheService.invalidate('admin:');
 
     res.status(200).json({
@@ -236,6 +238,7 @@ exports.deleteProduct = async (req, res) => {
 
     cacheService.invalidate('products:');
     cacheService.invalidate('combos:');
+    cacheService.invalidate('categories:');
     cacheService.invalidate('admin:');
 
     res.status(200).json({

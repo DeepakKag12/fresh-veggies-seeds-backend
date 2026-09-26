@@ -133,6 +133,9 @@ exports.updateSettingsSection = async (req, res) => {
 
     await settings.save();
     Settings.invalidateCache();
+    cacheService.invalidate('settings:');
+    cacheService.invalidate('products:');
+    cacheService.invalidate('combos:');
 
     res.status(200).json({
       success: true,
@@ -172,6 +175,9 @@ exports.resetSettingsSection = async (req, res) => {
     }
 
     Settings.invalidateCache();
+    cacheService.invalidate('settings:');
+    cacheService.invalidate('products:');
+    cacheService.invalidate('combos:');
 
     res.status(200).json({
       success: true,

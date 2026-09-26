@@ -263,6 +263,7 @@ app.use('/api/coupons',     require('./routes/coupon.routes'));
 app.use('/api/reviews',     require('./routes/review.routes'));
 app.use('/api/banners',     publicCache({ maxAge: 120, sMaxAge: 300, staleWhileRevalidate: 600 }), require('./routes/banner.routes'));
 app.use('/api/settings',    publicCache({ maxAge: 300, sMaxAge: 600, staleWhileRevalidate: 1800 }), require('./routes/settings.routes'));
+app.use('/api/contact',     require('./routes/contact.routes'));
 
 // ─── Root / Health ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {

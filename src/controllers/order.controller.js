@@ -202,8 +202,10 @@ exports.createOrder = async (req, res) => {
         statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Order placed' }]
       });
 
-      // Invalidate admin stats cache so dashboard reflects new order immediately
+      // Invalidate admin stats cache and catalogue caches so dashboard & stock levels reflect new order immediately
       statsCache.invalidate('admin:');
+      statsCache.invalidate('products:');
+      statsCache.invalidate('combos:');
     } catch (createErr) {
       // The coupon use was claimed before the order existed — hand it back so a
       // failed insert does not silently burn one of the customer's allowance.
@@ -520,6 +522,10 @@ exports.updateOrderStatus = async (req, res) => {
     notify.sendStatusUpdate(order, customer, orderStatus).catch((err) =>
       console.error('⚠️  Status update notification failed:', err.message)
     );
+
+    statsCache.invalidate('admin:');
+    statsCache.invalidate('products:');
+    statsCache.invalidate('combos:');
 
     res.status(200).json({ success: true, data: order });
   } catch (error) {
