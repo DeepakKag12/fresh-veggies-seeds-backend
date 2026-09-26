@@ -10,7 +10,7 @@
 
 // ─── Delivery pricing ────────────────────────────────────────────────────────
 const Settings = require('../models/settings.model');
-const DEFAULT_FREE_DELIVERY_THRESHOLD = 300; // ₹ — order value at or above which delivery is free
+const DEFAULT_FREE_DELIVERY_THRESHOLD = 499; // ₹ — order value at or above which delivery is free
 const DEFAULT_DELIVERY_CHARGE         = 50;  // ₹ — flat fee below the threshold
 
 /**
