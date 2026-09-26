@@ -35,11 +35,22 @@ exports.getActiveBanners = async (req, res) => {
 
     const query = {
       isActive: true,
-      startDate: { $lte: now },
-      $or: [
-        { endDate: { $gte: now } },
-        { endDate: null }
-      ]
+      $and: [
+        {
+          $or: [
+            { startDate: { $lte: now } },
+            { startDate: null },
+            { startDate: { $exists: false } },
+          ],
+        },
+        {
+          $or: [
+            { endDate: { $gte: now } },
+            { endDate: null },
+            { endDate: { $exists: false } },
+          ],
+        },
+      ],
     };
 
     if (position) {

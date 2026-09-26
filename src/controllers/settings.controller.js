@@ -34,10 +34,17 @@ exports.getPublicSettings = async (req, res) => {
           codMaxOrder: settings.delivery.codMaxOrder,
           deliveryTime: settings.delivery.deliveryTime,
         },
+        orders: {
+          allowCustomerCancellation: settings.orders?.allowCustomerCancellation ?? true,
+          cancellationAllowedUntil: settings.orders?.cancellationAllowedUntil || 'Before Shipped',
+          autoCancelUnpaidOrders: settings.orders?.autoCancelUnpaidOrders ?? true,
+          unpaidOrderTimeoutMinutes: settings.orders?.unpaidOrderTimeoutMinutes ?? 30,
+        },
         inventory: {
-          showOnlyXLeft: settings.inventory.showOnlyXLeft,
-          allowBackorders: settings.inventory.allowBackorders,
-          autoHideOutOfStock: settings.inventory.autoHideOutOfStock,
+          lowStockThreshold: settings.inventory?.lowStockThreshold ?? 10,
+          showOnlyXLeft: settings.inventory?.showOnlyXLeft ?? true,
+          allowBackorders: settings.inventory?.allowBackorders ?? false,
+          autoHideOutOfStock: settings.inventory?.autoHideOutOfStock ?? false,
         },
         payments: {
           onlinePaymentEnabled: settings.payments.onlinePaymentEnabled,
@@ -115,11 +122,13 @@ exports.updateSettingsSection = async (req, res) => {
         if (updateData[s]) {
           const current = settings[s]?.toObject ? settings[s].toObject() : (settings[s] || {});
           settings[s] = { ...current, ...updateData[s] };
+          settings.markModified(s);
         }
       });
     } else {
       const current = settings[section]?.toObject ? settings[section].toObject() : (settings[section] || {});
       settings[section] = { ...current, ...updateData };
+      settings.markModified(section);
     }
 
     await settings.save();
