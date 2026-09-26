@@ -34,12 +34,24 @@ exports.getProducts = async (req, res) => {
     // catch below turned into a 500: anyone could trigger a server error with a
     // crafted URL like ?category=x. A malformed id simply matches nothing.
     if (category) {
-      if (!mongoose.Types.ObjectId.isValid(category)) {
-        return res.status(200).json({
-          success: true, count: 0, total: 0, totalPages: 0, currentPage: 1, data: [],
-        });
+      if (mongoose.Types.ObjectId.isValid(category)) {
+        query.categoryId = category;
+      } else {
+        const Category = require('../models/category.model');
+        const catDoc = await Category.findOne({
+          $or: [
+            { slug: category.toLowerCase() },
+            { name: new RegExp(`^${category}$`, 'i') }
+          ]
+        }).select('_id').lean();
+        if (catDoc) {
+          query.categoryId = catDoc._id;
+        } else {
+          return res.status(200).json({
+            success: true, count: 0, total: 0, totalPages: 0, currentPage: 1, data: [],
+          });
+        }
       }
-      query.categoryId = category;
     }
 
     // Filter by season — plain string whitelist
