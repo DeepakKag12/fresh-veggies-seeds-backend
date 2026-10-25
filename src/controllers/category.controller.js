@@ -24,12 +24,12 @@ exports.getCategories = async (req, res) => {
 
     // Define desired order
     const order = ['Vegetable Seeds', 'Flower Seeds', 'Grow Bags', 'Soil & Fertilizers', 'Tools', 'Herbs'];
-    
+
     // Sort categories based on the defined order
     const sortedCategories = categories.sort((a, b) => {
       const indexA = order.indexOf(a.name);
       const indexB = order.indexOf(b.name);
-      
+
       // If both are in the order array, sort by their index
       if (indexA !== -1 && indexB !== -1) {
         return indexA - indexB;
@@ -141,6 +141,15 @@ exports.updateCategory = async (req, res) => {
 // @access  Private/Admin
 exports.deleteCategory = async (req, res) => {
   try {
+    const Product = require('../models/product.model');
+    const associatedProducts = await Product.countDocuments({ categoryId: req.params.id });
+    if (associatedProducts > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete category: ${associatedProducts} product(s) are still assigned to it. Please reassign or delete them first.`
+      });
+    }
+
     const category = await Category.findByIdAndDelete(req.params.id);
 
     if (!category) {

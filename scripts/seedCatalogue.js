@@ -94,15 +94,15 @@ const img = (slug, n, w = 600) => {
 };
 
 const CATEGORIES = [
-  { name: 'Vegetable Seeds',    slug: 'vegetable-seeds',    icon: '🥬', keywords: 'vegetable,seeds' },
-  { name: 'Flower Seeds',       slug: 'flower-seeds',       icon: '🌸', keywords: 'flower,seeds' },
-  { name: 'Grow Bags',          slug: 'grow-bags',          icon: '🎒', keywords: 'grow,bag,garden' },
-  { name: 'Soil & Fertilizers', slug: 'soil-fertilizers',   icon: '🌱', keywords: 'soil,compost' },
-  { name: 'Tools',              slug: 'tools',              icon: '🛠️', keywords: 'garden,tools' },
-  { name: 'Plants',             slug: 'plants',             icon: '🪴', keywords: 'houseplant,pot' },
-  { name: 'Fertilizers',        slug: 'fertilizers',        icon: '🌾', keywords: 'fertilizer,garden' },
-  { name: 'Watering Solutions', slug: 'watering-solutions', icon: '💧', keywords: 'watering,can' },
-  { name: 'Pest Control',       slug: 'pest-control',       icon: '🐛', keywords: 'garden,spray' },
+  { name: 'Vegetable Seeds',    slug: 'vegetable-seeds',    icon: '/sandbox-assets/icons/seeds.webp', keywords: 'vegetable,seeds' },
+  { name: 'Flower Seeds',       slug: 'flower-seeds',       icon: '/sandbox-assets/icons/flowers.png', keywords: 'flower,seeds' },
+  { name: 'Grow Bags',          slug: 'grow-bags',          icon: '/sandbox-assets/icons/pots.webp', keywords: 'grow,bag,garden' },
+  { name: 'Soil & Fertilizers', slug: 'soil-fertilizers',   icon: '/sandbox-assets/icons/soils.webp', keywords: 'soil,compost' },
+  { name: 'Tools',              slug: 'tools',              icon: '/sandbox-assets/icons/tools.webp', keywords: 'garden,tools' },
+  { name: 'Plants',             slug: 'plants',             icon: '/sandbox-assets/icons/plants.webp', keywords: 'houseplant,pot' },
+  { name: 'Fertilizers',        slug: 'fertilizers',        icon: '/sandbox-assets/icons/fertilisers.webp', keywords: 'fertilizer,garden' },
+  { name: 'Watering Solutions', slug: 'watering-solutions', icon: '/sandbox-assets/icons/watering.webp', keywords: 'watering,can' },
+  { name: 'Pest Control',       slug: 'pest-control',       icon: '/sandbox-assets/icons/pest.webp', keywords: 'garden,spray' },
 ];
 
 // Product names per category. Real-sounding SKUs rather than "Product 47".
@@ -224,24 +224,7 @@ const rand = (seed) => {
     });
   }
 
-  // Top up to exactly 100 with extra pack sizes of existing lines.
-  let extra = 0;
-  while (products.length < 100) {
-    const base = products[extra % products.length];
-    lock += 1;
-    products.push({
-      ...base,
-      name: `${base.name} (Value Pack)`,
-      price: Math.round(base.price * 1.7),
-      originalPrice: Math.round(base.originalPrice * 1.7),
-      stock: Math.floor(5 + rand(lock) * 120),
-      images: [img(base.__slug || 'plants', extra), img(base.__slug || 'plants', extra + 1)],
-      featured: false,
-      packages: undefined,
-    });
-    extra += 1;
-  }
-  const clean = products.slice(0, 100).map(({ __slug, ...rest }) => rest);
+  const clean = products.map(({ __slug, ...rest }) => rest);
   const created = await Product.insertMany(clean);
   console.log(`✅ ${created.length} products created`);
 

@@ -7,11 +7,16 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
 async function testRoutes() {
   console.log('🧪 ─── STARTING FRONTEND-BACKEND ROUTE CONNECTIVITY AUDIT ───\n');
 
-  // Load the running server
-  require('../src/server');
-
-  // Give server 1.5s to bind port and connect DB
-  await new Promise((r) => setTimeout(r, 1500));
+  // Check if server is already running on port 5000
+  try {
+    await axios.get('http://127.0.0.1:5000/health', { timeout: 1500, validateStatus: () => true });
+    console.log('ℹ️  Connected to existing server on port 5000\n');
+  } catch (e) {
+    // Not running, load the server
+    console.log('ℹ️  Starting server instance...\n');
+    require('../src/server');
+    await new Promise((r) => setTimeout(r, 1500));
+  }
 
   const client = axios.create({
     baseURL: 'http://127.0.0.1:5000/api',

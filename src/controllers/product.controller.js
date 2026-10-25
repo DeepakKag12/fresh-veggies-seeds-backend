@@ -34,22 +34,103 @@ exports.getProducts = async (req, res) => {
     // catch below turned into a 500: anyone could trigger a server error with a
     // crafted URL like ?category=x. A malformed id simply matches nothing.
     if (category) {
+      const Category = require('../models/category.model');
+      const catLower = category.toLowerCase();
       if (mongoose.Types.ObjectId.isValid(category)) {
-        query.categoryId = category;
-      } else {
-        const Category = require('../models/category.model');
-        const catDoc = await Category.findOne({
-          $or: [
-            { slug: category.toLowerCase() },
-            { name: new RegExp(`^${category}$`, 'i') }
-          ]
-        }).select('_id').lean();
+        const catDoc = await Category.findById(category).lean();
         if (catDoc) {
-          query.categoryId = catDoc._id;
+          const docSlug = (catDoc.slug || '').toLowerCase();
+          const docName = (catDoc.name || '').toLowerCase();
+          if (docSlug === 'seeds' || docName.includes('seed')) {
+            const seedCats = await Category.find({
+              $or: [
+                { _id: category },
+                { slug: { $in: ['seeds', 'vegetable-seeds', 'flower-seeds'] } },
+                { name: { $regex: /seeds/i } }
+              ]
+            }).select('_id').lean();
+            query.categoryId = { $in: seedCats.map(c => c._id) };
+          } else if (docSlug === 'pots' || docName.includes('pot') || docName.includes('planter')) {
+            const potCats = await Category.find({
+              $or: [
+                { _id: category },
+                { slug: { $in: ['pots', 'planters', 'grow-bags'] } },
+                { name: { $regex: /pot|planter|grow bag/i } }
+              ]
+            }).select('_id').lean();
+            query.categoryId = { $in: potCats.map(c => c._id) };
+          } else if (docSlug === 'soils' || docSlug === 'soil' || docSlug === 'fertilizers' || docSlug === 'fertilisers' || docName.includes('soil') || docName.includes('fertil')) {
+            const soilCats = await Category.find({
+              $or: [
+                { _id: category },
+                { slug: { $in: ['soils', 'soil', 'fertilizers', 'fertilisers', 'soil-fertilizers'] } },
+                { name: { $regex: /soil|fertil/i } }
+              ]
+            }).select('_id').lean();
+            query.categoryId = { $in: soilCats.map(c => c._id) };
+          } else if (docSlug === 'garden-tools' || docSlug === 'tools' || docName.includes('tool')) {
+            const toolCats = await Category.find({
+              $or: [
+                { _id: category },
+                { slug: { $in: ['tools', 'garden-tools'] } },
+                { name: { $regex: /tool/i } }
+              ]
+            }).select('_id').lean();
+            query.categoryId = { $in: toolCats.map(c => c._id) };
+          } else {
+            query.categoryId = category;
+          }
         } else {
-          return res.status(200).json({
-            success: true, count: 0, total: 0, totalPages: 0, currentPage: 1, data: [],
-          });
+          query.categoryId = category;
+        }
+      } else {
+        if (catLower === 'seeds' || catLower.includes('seed')) {
+          const seedCats = await Category.find({
+            $or: [
+              { slug: { $in: ['seeds', 'vegetable-seeds', 'flower-seeds'] } },
+              { name: { $regex: /seeds/i } }
+            ]
+          }).select('_id').lean();
+          query.categoryId = { $in: seedCats.map(c => c._id) };
+        } else if (catLower === 'pots' || catLower === 'planters' || catLower.includes('pot') || catLower.includes('planter')) {
+          const potCats = await Category.find({
+            $or: [
+              { slug: { $in: ['pots', 'planters', 'grow-bags'] } },
+              { name: { $regex: /pot|planter|grow bag/i } }
+            ]
+          }).select('_id').lean();
+          query.categoryId = { $in: potCats.map(c => c._id) };
+        } else if (catLower === 'soils' || catLower === 'soil' || catLower.includes('fertil') || catLower.includes('soil')) {
+          const soilCats = await Category.find({
+            $or: [
+              { slug: { $in: ['soils', 'soil', 'fertilizers', 'fertilisers', 'soil-fertilizers'] } },
+              { name: { $regex: /soil|fertil/i } }
+            ]
+          }).select('_id').lean();
+          query.categoryId = { $in: soilCats.map(c => c._id) };
+        } else if (catLower === 'tools' || catLower === 'garden-tools' || catLower.includes('tool')) {
+          const toolCats = await Category.find({
+            $or: [
+              { slug: { $in: ['tools', 'garden-tools'] } },
+              { name: { $regex: /tool/i } }
+            ]
+          }).select('_id').lean();
+          query.categoryId = { $in: toolCats.map(c => c._id) };
+        } else {
+          const catDoc = await Category.findOne({
+            $or: [
+              { slug: catLower },
+              { name: new RegExp(`^${category}$`, 'i') },
+              { name: new RegExp(category, 'i') }
+            ]
+          }).select('_id').lean();
+          if (catDoc) {
+            query.categoryId = catDoc._id;
+          } else {
+            return res.status(200).json({
+              success: true, count: 0, total: 0, totalPages: 0, currentPage: 1, data: [],
+            });
+          }
         }
       }
     }
@@ -239,6 +320,15 @@ exports.updateProduct = async (req, res) => {
 // @access  Private/Admin
 exports.deleteProduct = async (req, res) => {
   try {
+    const Combo = require('../models/combo.model');
+    const inCombos = await Combo.countDocuments({ 'includedProducts.productId': req.params.id });
+    if (inCombos > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete product: it is included in ${inCombos} combo(s). Please remove it from combo package(s) first.`
+      });
+    }
+
     const product = await Product.findByIdAndDelete(req.params.id);
 
     if (!product) {
@@ -247,6 +337,10 @@ exports.deleteProduct = async (req, res) => {
         message: 'Product not found'
       });
     }
+
+    // Cascade delete reviews for this product so orphaned reviews do not remain
+    const Review = require('../models/review.model');
+    await Review.deleteMany({ productId: req.params.id });
 
     cacheService.invalidate('products:');
     cacheService.invalidate('combos:');

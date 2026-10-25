@@ -25,6 +25,7 @@ const {
   setDefaultAddress
 } = require('../controllers/auth.controller');
 const { protect } = require('../middleware/auth.middleware');
+const validateObjectId = require('../middleware/validate-object-id.middleware');
 const rateLimit = require('express-rate-limit');
 
 // ─── Rate Limiters ────────────────────────────────────────────────────────────
@@ -92,8 +93,8 @@ router.put('/change-password', protect, changePassword);
 
 // Delivery address management
 router.post('/addresses', protect, addAddress);
-router.put('/addresses/:addressId', protect, updateAddress);
-router.delete('/addresses/:addressId', protect, deleteAddress);
-router.put('/addresses/:addressId/default', protect, setDefaultAddress);
+router.put('/addresses/:addressId', protect, validateObjectId('addressId'), updateAddress);
+router.delete('/addresses/:addressId', protect, validateObjectId('addressId'), deleteAddress);
+router.put('/addresses/:addressId/default', protect, validateObjectId('addressId'), setDefaultAddress);
 
 module.exports = router;

@@ -44,6 +44,38 @@ router.post('/', protect, admin, upload.single('image'), async (req, res) => {
   }
 });
 
+// @desc    Customer review photo upload
+// @route   POST /api/upload/review-image
+// @access  Private (any logged-in customer)
+router.post('/review-image', protect, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Please select an image to upload.' });
+    }
+
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { folder: 'fresh-veggies/reviews', resource_type: 'image' },
+        (error, uploadRes) => {
+          if (error) reject(error);
+          else resolve(uploadRes);
+        }
+      );
+      uploadStream.end(req.file.buffer);
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        url: result.secure_url,
+        publicId: result.public_id
+      }
+    });
+  } catch (error) {
+    return serverError(res, error, 'uploadRoutes.js → review-image');
+  }
+});
+
 // @desc    Delete image from Cloudinary
 // @route   DELETE /api/upload/:publicId
 // @access  Private/Admin

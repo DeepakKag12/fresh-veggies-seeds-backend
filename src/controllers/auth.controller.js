@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const User = require('../models/user.model');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -254,24 +255,29 @@ exports.verifyEmail = async (req, res) => {
 // @access  Private
 exports.getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('-emailVerificationToken -emailVerificationExpires -resetPasswordToken -resetPasswordExpires -otpToken -otpExpires');
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const userDoc = await User.findById(req.user._id).select('+password -emailVerificationToken -emailVerificationExpires -resetPasswordToken -resetPasswordExpires -otpToken -otpExpires');
+    if (!userDoc) return res.status(404).json({ success: false, message: 'User not found' });
 
     // Backfill addresses if legacy address exists and addresses is empty
-    if ((!user.addresses || user.addresses.length === 0) && user.address?.street) {
-      user.addresses = [{
-        name: user.name,
-        phone: user.phone,
-        street: user.address.street,
-        city: user.address.city,
-        state: user.address.state,
-        pincode: user.address.pincode,
-        country: user.address.country || 'India',
+    if ((!userDoc.addresses || userDoc.addresses.length === 0) && userDoc.address?.street) {
+      userDoc.addresses = [{
+        name: userDoc.name,
+        phone: userDoc.phone,
+        street: userDoc.address.street,
+        city: userDoc.address.city,
+        state: userDoc.address.state,
+        pincode: userDoc.address.pincode,
+        country: userDoc.address.country || 'India',
         isDefault: true,
         createdAt: new Date()
       }];
-      await user.save({ validateBeforeSave: false });
+      await userDoc.save({ validateBeforeSave: false });
     }
+
+    const hasPassword = Boolean(userDoc.password);
+    const user = userDoc.toObject();
+    delete user.password;
+    user.hasPassword = hasPassword;
 
     res.status(200).json({
       success: true,
@@ -408,52 +414,90 @@ exports.changeEmail = async (req, res) => {
     const normalizedEmail = newEmail?.trim().toLowerCase();
 
     // Validate input
-    if (!normalizedEmail || !password) {
+    if (!normalizedEmail) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide new email and current password'
+        message: 'Please provide a valid new email address.'
+      });
+    }
+
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid email address.'
       });
     }
 
     // Get user with password
     const user = await User.findById(req.user._id).select('+password');
-    
-    // Verify current password
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
-    }
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Check if new email already exists
-    const existingEmail = await User.findOne({ email: normalizedEmail });
-    if (existingEmail && existingEmail._id.toString() !== user._id.toString()) {
+    if (user.email && normalizedEmail === user.email.toLowerCase()) {
       return res.status(400).json({
         success: false,
-        message: 'This email is already in use'
+        message: 'New email cannot be the same as your current email.'
       });
     }
 
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-    user.email = normalizedEmail;
-    user.emailVerified = false;
-    user.emailVerificationToken = crypto.createHash('sha256').update(verificationToken).digest('hex');
-    user.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000;
-    await user.save();
-
-    const emailResult = await emailService.sendVerificationEmail(
-      user,
-      `${getFrontendUrl()}/verify-email/${verificationToken}`
-    );
-    if (!emailResult.success) {
-      return res.status(500).json({ success: false, message: 'Email changed, but verification email could not be sent.' });
+    // Verify current password only if user already has a password set
+    if (user.password) {
+      if (!password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide your current password to change email.'
+        });
+      }
+      const isMatch = await user.comparePassword(password);
+      if (!isMatch) {
+        return res.status(401).json({
+          success: false,
+          message: 'Current password is incorrect.'
+        });
+      }
     }
+
+    // Check if new email already exists on another account
+    const existingEmail = await User.findOne({ email: normalizedEmail });
+    if (existingEmail && existingEmail._id.toString() !== user._id.toString()) {
+      return res.status(409).json({
+        success: false,
+        message: 'This email is already in use by another account.'
+      });
+    }
+
+    const mustVerify = requireEmailVerification();
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+
+    if (mustVerify) {
+      const emailResult = await emailService.sendVerificationEmail(
+        { ...user.toObject(), email: normalizedEmail },
+        `${getFrontendUrl()}/verify-email/${verificationToken}`
+      );
+      if (!emailResult.success) {
+        return res.status(500).json({ success: false, message: 'Could not send verification email. Please try again later.' });
+      }
+      user.email = normalizedEmail;
+      user.emailVerified = false;
+      user.emailVerificationToken = crypto.createHash('sha256').update(verificationToken).digest('hex');
+      user.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000;
+    } else {
+      user.email = normalizedEmail;
+      user.emailVerified = true;
+      user.emailVerificationToken = undefined;
+      user.emailVerificationExpires = undefined;
+      emailService.sendVerificationEmail(
+        user,
+        `${getFrontendUrl()}/verify-email/${verificationToken}`
+      ).catch(() => {});
+    }
+
+    await user.save();
 
     res.status(200).json({
       success: true,
-      message: 'Email updated. Please verify your new email address before logging in again.',
+      message: mustVerify
+        ? 'Email updated. Please verify your new email address before logging in again.'
+        : 'Email updated successfully.',
       data: {
         _id: user._id,
         name: user.name,
@@ -475,10 +519,10 @@ exports.changePassword = async (req, res) => {
     const { currentPassword, newPassword } = req.body;
 
     // Validate input
-    if (!currentPassword || !newPassword) {
+    if (!newPassword) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide current password and new password'
+        message: 'Please provide new password'
       });
     }
 
@@ -487,23 +531,33 @@ exports.changePassword = async (req, res) => {
       return res.status(400).json({ success: false, message: pwCheck.message });
     }
 
-    if (currentPassword === newPassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'New password must be different from your current password.'
-      });
-    }
-
     // Get user with password
     const user = await User.findById(req.user._id).select('+password');
-    
-    // Verify current password
-    const isMatch = await user.comparePassword(currentPassword);
-    if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // If user already has a password, verify current password
+    if (user.password) {
+      if (!currentPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide current password and new password'
+        });
+      }
+
+      if (currentPassword === newPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be different from your current password.'
+        });
+      }
+
+      const isMatch = await user.comparePassword(currentPassword);
+      if (!isMatch) {
+        return res.status(401).json({
+          success: false,
+          message: 'Current password is incorrect'
+        });
+      }
     }
 
     // Update password (will be hashed by pre-save hook)
@@ -1122,6 +1176,9 @@ exports.addAddress = async (req, res) => {
 exports.updateAddress = async (req, res) => {
   try {
     const { addressId } = req.params;
+    if (!addressId || !mongoose.Types.ObjectId.isValid(addressId)) {
+      return res.status(400).json({ success: false, message: 'Invalid address ID format.' });
+    }
     const { name, phone, street, city, state, pincode, country, isDefault } = req.body;
 
     const user = await User.findById(req.user._id);
@@ -1179,6 +1236,9 @@ exports.updateAddress = async (req, res) => {
 exports.deleteAddress = async (req, res) => {
   try {
     const { addressId } = req.params;
+    if (!addressId || !mongoose.Types.ObjectId.isValid(addressId)) {
+      return res.status(400).json({ success: false, message: 'Invalid address ID format.' });
+    }
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -1221,6 +1281,9 @@ exports.deleteAddress = async (req, res) => {
 exports.setDefaultAddress = async (req, res) => {
   try {
     const { addressId } = req.params;
+    if (!addressId || !mongoose.Types.ObjectId.isValid(addressId)) {
+      return res.status(400).json({ success: false, message: 'Invalid address ID format.' });
+    }
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 

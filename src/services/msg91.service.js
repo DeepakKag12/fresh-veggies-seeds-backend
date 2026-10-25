@@ -213,7 +213,10 @@ const sendOtp = async (phone) => {
         console.warn('⚠️ [MSG91] API returned success but balance is 0. SMS will NOT reach the phone.');
         return {
           success: true,
-          message: `OTP request submitted for +91 ${cleanPhone}. If SMS doesn't arrive, MSG91 account needs recharge.`,
+          message:
+            process.env.NODE_ENV !== 'production'
+              ? `OTP sent to +91 ${cleanPhone} (Test Mode OTP: ${generatedOtp})`
+              : `OTP request submitted for +91 ${cleanPhone}. If SMS doesn't arrive, MSG91 account needs recharge.`,
           requestId: response.data.request_id,
           balanceWarning: true
         };
@@ -228,12 +231,36 @@ const sendOtp = async (phone) => {
 
     // Non-success response from MSG91
     console.error('❌ [MSG91] Non-success response:', JSON.stringify(response.data));
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`🧪 [DEV MODE] Caching fallback OTP ${generatedOtp} for +91 ${cleanPhone}`);
+      otpCache.set(cleanPhone, {
+        otp: generatedOtp,
+        expiresAt: Date.now() + 10 * 60 * 1000
+      });
+      return {
+        success: true,
+        message: `OTP sent to +91 ${cleanPhone} (Test Mode OTP: ${generatedOtp})`,
+        requestId: 'dev-mock-req-' + Date.now()
+      };
+    }
     return {
       success: false,
       message: response.data?.message || 'MSG91 could not send OTP. Please try again.'
     };
   } catch (err) {
     console.error('❌ [MSG91] Send OTP failed:', err.response?.data || err.message);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`🧪 [DEV MODE] Caching fallback OTP ${generatedOtp} for +91 ${cleanPhone}`);
+      otpCache.set(cleanPhone, {
+        otp: generatedOtp,
+        expiresAt: Date.now() + 10 * 60 * 1000
+      });
+      return {
+        success: true,
+        message: `OTP sent to +91 ${cleanPhone} (Test Mode OTP: ${generatedOtp})`,
+        requestId: 'dev-mock-req-' + Date.now()
+      };
+    }
     return {
       success: false,
       message: 'Failed to send OTP. Please try again later or contact support.'

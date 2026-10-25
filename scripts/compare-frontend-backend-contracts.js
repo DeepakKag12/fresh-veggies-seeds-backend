@@ -88,6 +88,7 @@ const registered = [
   { method: 'PUT', path: '/reviews/:id/approve' },
   { method: 'DELETE', path: '/reviews/:id' },
   { method: 'PUT', path: '/reviews/:id' },
+  { method: 'POST', path: '/reviews/:id/helpful' },
   { method: 'GET', path: '/reviews/admin' },
   { method: 'GET', path: '/reviews/eligibility/:productId' },
   { method: 'GET', path: '/reviews/product/:productId' },
@@ -97,6 +98,7 @@ const registered = [
   { method: 'GET', path: '/settings/admin' },
   { method: 'GET', path: '/settings' },
   { method: 'DELETE', path: '/upload/:publicId' },
+  { method: 'POST', path: '/upload/review-image' },
   { method: 'POST', path: '/upload' },
 ];
 

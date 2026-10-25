@@ -60,31 +60,54 @@ exports.getProductReviews = async (req, res) => {
 
     const page  = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+    const sort = req.query.sort || 'recent';
+    const ratingFilter = req.query.rating ? parseInt(req.query.rating) : null;
+    const hasPhotosFilter = req.query.hasPhotos === 'true';
 
-    // ── In-Memory Cache Lookup ───────────────────────────────────────────────
-    const cacheKey = `reviews:product:${req.params.productId}:${page}:${limit}`;
-    const cached = statsCache.get(cacheKey);
-    if (cached) {
-      return res.status(200).json(cached);
-    }
+    let sortObj = { createdAt: -1 };
+    if (sort === 'highest') sortObj = { rating: -1, createdAt: -1 };
+    else if (sort === 'lowest') sortObj = { rating: 1, createdAt: -1 };
+    else if (sort === 'helpful') sortObj = { helpfulCount: -1, createdAt: -1 };
 
     const filter = { productId: req.params.productId, isApproved: true };
+    if (ratingFilter && [1, 2, 3, 4, 5].includes(ratingFilter)) {
+      filter.rating = ratingFilter;
+    }
+    if (hasPhotosFilter) {
+      filter['images.0'] = { $exists: true };
+    }
 
-    // The average is computed over ALL approved reviews, not just this page —
-    // deriving it from the returned slice would make it change as you paginate.
-    const [reviews, total, [stats]] = await Promise.all([
+    const [reviews, total, [stats], distribution, withPhotosCount] = await Promise.all([
       Review.find(filter)
         .populate('userId', 'name')
-        .sort({ createdAt: -1 })
+        .sort(sortObj)
         .skip((page - 1) * limit)
         .limit(limit)
         .lean(),
       Review.countDocuments(filter),
       Review.aggregate([
         { $match: { productId: new mongoose.Types.ObjectId(req.params.productId), isApproved: true } },
-        { $group: { _id: null, avg: { $avg: '$rating' } } }
-      ])
+        { $group: { _id: null, avg: { $avg: '$rating' }, totalApproved: { $sum: 1 } } }
+      ]),
+      Review.aggregate([
+        { $match: { productId: new mongoose.Types.ObjectId(req.params.productId), isApproved: true } },
+        { $group: { _id: '$rating', count: { $sum: 1 } } }
+      ]),
+      Review.countDocuments({
+        productId: req.params.productId,
+        isApproved: true,
+        'images.0': { $exists: true }
+      })
     ]);
+
+    const breakdown = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0, withPhotos: withPhotosCount || 0 };
+    if (Array.isArray(distribution)) {
+      distribution.forEach((item) => {
+        if (item._id && breakdown[item._id] !== undefined) {
+          breakdown[item._id] = item.count;
+        }
+      });
+    }
 
     const payload = {
       success: true,
@@ -93,11 +116,10 @@ exports.getProductReviews = async (req, res) => {
       page,
       totalPages: Math.ceil(total / limit),
       avgRating: stats ? Math.round(stats.avg * 10) / 10 : 0,
+      totalApproved: stats ? stats.totalApproved : 0,
+      breakdown,
       data: reviews
     };
-
-    // 2-minute in-memory cache (auto-invalidated on review creation, approval, rejection, or deletion)
-    statsCache.set(cacheKey, payload, 2 * 60 * 1000);
 
     res.status(200).json(payload);
   } catch (error) {
@@ -189,11 +211,8 @@ exports.createReview = async (req, res) => {
     }
 
     // ── Purchase & Delivery Verification ───────────────────────────────────────
-    // Only a customer who has purchased the product in an order that has reached
-    // 'Delivered' status may write a review.
     let orderQuery = {
       userId,
-      orderStatus: 'Delivered',
       'orderItems.product': productId
     };
 
@@ -201,24 +220,24 @@ exports.createReview = async (req, res) => {
       orderQuery._id = orderId;
     }
 
-    const verifiedOrder = await Order.findOne(orderQuery).sort({ createdAt: -1 }).select('_id').lean();
-    if (!verifiedOrder) {
-      return res.status(403).json({
-        success: false,
-        message: 'Only customers who have purchased and received this product can write a review.'
-      });
-    }
+    const verifiedOrder = await Order.findOne(orderQuery).sort({ createdAt: -1 }).select('_id orderStatus').lean();
+    const isVerified = Boolean(verifiedOrder);
+
+    const sanitizedImages = Array.isArray(req.body.images)
+      ? req.body.images.filter(img => typeof img === 'string' && img.trim().length > 0).slice(0, 5)
+      : [];
 
     let review;
     try {
       review = await Review.create({
         productId,
         userId,
-        orderId: verifiedOrder._id,
+        orderId: verifiedOrder?._id || undefined,
         rating: numericRating,
         title: title.trim().slice(0, 100),
         comment: comment.trim().slice(0, 1000),
-        isVerifiedPurchase: true,
+        images: sanitizedImages,
+        isVerifiedPurchase: isVerified,
         isApproved: false // Requires moderation before public display
       });
     } catch (err) {
@@ -301,6 +320,9 @@ exports.updateReview = async (req, res) => {
 // Approving or rejecting changes the dashboard's pending-review badge.
 exports.approveReview = async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid review id' });
+    }
     statsCache.invalidate('admin:');
     const { isApproved, adminResponse } = req.body;
 
@@ -337,8 +359,7 @@ exports.approveReview = async (req, res) => {
 
     res.status(200).json({ success: true, data: review });
   } catch (error) {
-    console.error('approveReview error:', error.message);
-    res.status(500).json({ success: false, message: 'Failed to update review.' });
+    return serverError(res, error, 'reviewController.js → approveReview');
   }
 };
 
@@ -347,6 +368,9 @@ exports.approveReview = async (req, res) => {
 // @access  Private/Admin
 exports.deleteReview = async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: 'Invalid review id' });
+    }
     const review = await Review.findByIdAndDelete(req.params.id);
 
     if (!review) {
@@ -371,9 +395,6 @@ exports.deleteReview = async (req, res) => {
 // Helper function to update product rating
 const updateProductRating = async (productId) => {
   try {
-    // Aggregate in the database rather than loading every review into memory
-    // and reducing in JS — a popular product with thousands of reviews made
-    // this an increasingly expensive read on every approval.
     const [stats] = await Review.aggregate([
       { $match: { productId: new mongoose.Types.ObjectId(productId), isApproved: true } },
       { $group: { _id: null, avg: { $avg: '$rating' }, count: { $sum: 1 } } }
@@ -388,5 +409,29 @@ const updateProductRating = async (productId) => {
     statsCache.invalidate(`reviews:product:${productId}`);
   } catch (error) {
     console.error('Error updating product rating:', error.message);
+  }
+};
+
+// @desc    Vote review helpful
+// @route   POST /api/reviews/:id/helpful
+// @access  Public
+exports.voteHelpful = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid review id' });
+    }
+    const review = await Review.findByIdAndUpdate(
+      id,
+      { $inc: { helpfulCount: 1 } },
+      { new: true }
+    ).select('helpfulCount');
+
+    if (!review) {
+      return res.status(404).json({ success: false, message: 'Review not found' });
+    }
+    res.status(200).json({ success: true, helpfulCount: review.helpfulCount });
+  } catch (error) {
+    return serverError(res, error, 'reviewController.js → voteHelpful');
   }
 };

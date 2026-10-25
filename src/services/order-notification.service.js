@@ -135,21 +135,23 @@ exports.notifyAdminNewOrder = async (order, user) => {
   const promises = [];
 
   if (emailEnabled) {
-    const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.sendOrdermailtoadmin || process.env.BREVO_FROM_EMAIL;
-    promises.push(
-      send(
-        adminEmail,
-        `🛒 New order ${order.orderNumber} — ${money(order.totalAmount)}`,
-        layout(`New order received`, `
-          <p style="font-size:14px"><strong>${order.orderNumber}</strong> · ${order.paymentMode === 'COD' ? 'Cash on Delivery' : 'Paid online'}</p>
-          <h3 style="font-size:15px;margin:20px 0 4px">Customer</h3>
-          <p style="font-size:14px;margin:4px 0">${user?.name || order?.shippingAddress?.name || '—'}<br>📞 ${user?.phone || order?.shippingAddress?.phone || '—'}<br>✉️ ${user?.email || order?.shippingAddress?.email || '—'}</p>
-          ${itemsTable(order)}
-          <h3 style="font-size:15px;margin:20px 0 4px">Ship to</h3>
-          ${addressBlock(order.shippingAddress)}
-        `)
-      )
-    );
+    const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.sendOrdermailtoadmin || settings?.store?.email || settings?.store?.supportEmail || process.env.BREVO_FROM_EMAIL;
+    if (adminEmail) {
+      promises.push(
+        send(
+          adminEmail,
+          `🛒 New order ${order.orderNumber} — ${money(order.totalAmount)}`,
+          layout(`New order received`, `
+            <p style="font-size:14px"><strong>${order.orderNumber}</strong> · ${order.paymentMode === 'COD' ? 'Cash on Delivery' : 'Paid online'}</p>
+            <h3 style="font-size:15px;margin:20px 0 4px">Customer</h3>
+            <p style="font-size:14px;margin:4px 0">${user?.name || order?.shippingAddress?.name || '—'}<br>📞 ${user?.phone || order?.shippingAddress?.phone || '—'}<br>✉️ ${user?.email || order?.shippingAddress?.email || '—'}</p>
+            ${itemsTable(order)}
+            <h3 style="font-size:15px;margin:20px 0 4px">Ship to</h3>
+            ${addressBlock(order.shippingAddress)}
+          `)
+        )
+      );
+    }
   }
 
   if (whatsappEnabled) {
@@ -172,7 +174,7 @@ exports.notifyAdminCancellationRequest = async (order, user) => {
 
   if (!emailEnabled) return { success: true, message: 'Admin cancellation-request email disabled in settings' };
 
-  const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.BREVO_FROM_EMAIL;
+  const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.sendOrdermailtoadmin || settings?.store?.email || settings?.store?.supportEmail || process.env.BREVO_FROM_EMAIL;
   return send(
     adminEmail,
     `⚠️ Cancellation request — order ${order.orderNumber}`,

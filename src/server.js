@@ -25,42 +25,79 @@ const allowedOrigins = [
   process.env.FRONTEND_URL,
   // Extra origins for a specific deployment, comma-separated.
   ...(process.env.ALLOWED_ORIGINS || '').split(',').map((o) => o.trim()),
-].filter(Boolean);
+]
+  .filter(Boolean)
+  .map((o) => o.replace(/\/+$/, ''));
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-// In development the frontend moves between ports — 3000 for `npm start`, 4173
-// or 5173 for a served build, whatever `serve` picks next. Hard-coding a couple
-// of ports meant a normal local setup was blocked by CORS with no obvious
-// cause. Any loopback origin is allowed off-production; production stays on the
-// explicit allow-list.
+// Allow loopback (localhost/127.0.0.1) as well as private LAN IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
 const isLocalOrigin = (origin) =>
-  /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin);
+  /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$/.test(origin);
 
 const corsOptions = {
   origin: function (origin, callback) {
+    // Non-browser or same-origin requests (mobile apps, curl, server-to-server)
     if (!origin) return callback(null, true);
-    if (
-      allowedOrigins.includes(origin) ||
-      (!isProduction && isLocalOrigin(origin)) ||
-      /^https:\/\/fresh-veggies-seeds.*\.vercel\.app$/.test(origin)
-    ) {
+
+    const cleanOrigin = origin.trim().replace(/\/+$/, '');
+
+    // Allow configured origins
+    if (allowedOrigins.includes(cleanOrigin)) {
       return callback(null, true);
     }
-    // Refuse without throwing: an Error here reaches the global handler and
-    // prints a full stack for what is just a disallowed origin. The request
-    // still fails the browser's CORS check, because no headers are sent.
+
+    // Allow local development & local network mobile testing off-production
+    if (!isProduction && isLocalOrigin(cleanOrigin)) {
+      return callback(null, true);
+    }
+
+    // Allow all Vercel deployments (*.vercel.app) for preview branches & production
+    if (/\.vercel\.app$/.test(cleanOrigin)) {
+      return callback(null, true);
+    }
+
+    // Wildcard or non-production environment override
+    if (process.env.FRONTEND_URL === '*' || !isProduction) {
+      return callback(null, true);
+    }
+
     console.warn(`⚠️  CORS: blocked origin ${origin}`);
     return callback(null, false);
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Cache-Control',
+    'Pragma',
+    'If-None-Match',
+    'If-Modified-Since',
+    'X-Refresh-Token',
+    'x-no-compression'
+  ],
+  exposedHeaders: [
+    'ETag',
+    'Content-Length',
+    'Content-Disposition',
+    'X-Total-Count',
+    'Cache-Control'
+  ],
+  maxAge: 86400, // 24 hours preflight cache
+  optionsSuccessStatus: 204
 };
 
 // ─── Security middleware ──────────────────────────────────────────────────────
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  crossOriginEmbedderPolicy: false,
+}));
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // ─── Response Compression ────────────────────────────────────────────────────
 // Gzip/Brotli compression cuts payload sizes for product/order/category JSON
@@ -95,7 +132,8 @@ const authLimiter = rateLimit({
   max: envInt('RATE_LIMIT_AUTH', 60),
   message: { success: false, message: 'Too many auth attempts, please try again in 15 minutes.' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => req.method === 'OPTIONS'
 });
 
 // Payment: 50 requests per 10 min
@@ -104,7 +142,8 @@ const paymentLimiter = rateLimit({
   max: envInt('RATE_LIMIT_PAYMENT', 50),
   message: { success: false, message: 'Too many payment requests. Please wait a moment.' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => req.method === 'OPTIONS'
 });
 
 // Order creation: 60 per 10 min
@@ -113,7 +152,8 @@ const orderLimiter = rateLimit({
   max: envInt('RATE_LIMIT_ORDER', 60),
   message: { success: false, message: 'Too many order requests.' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => req.method === 'OPTIONS'
 });
 
 // General API: 2000 per 15 min (generous so mobile and desktop users browsing products never get IP blocked)
@@ -121,7 +161,8 @@ const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: envInt('RATE_LIMIT_GENERAL', 2000),
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skip: (req) => req.method === 'OPTIONS'
 });
 
 app.use('/api/', generalLimiter);
@@ -244,8 +285,8 @@ app.use('/api/auth/login',         authLimiter);
 app.use('/api/auth/register',      authLimiter);
 app.use('/api/auth',               authRoutes);
 
-// Categories change rarely — cache hard, revalidate lazily.
-app.use('/api/categories',  publicCache({ maxAge: 300, sMaxAge: 600, staleWhileRevalidate: 1800 }), require('./routes/category.routes'));
+// Categories route uses short cache so admin visibility toggles take effect promptly
+app.use('/api/categories',  publicCache({ maxAge: 5, sMaxAge: 10, staleWhileRevalidate: 30 }), require('./routes/category.routes'));
 // Products carry stock/price, so keep the window short. Order creation
 // re-reads price and stock from the DB, so a stale list can never oversell.
 // Catalogue windows are deliberately short. HTTP caches cannot be invalidated
@@ -280,39 +321,46 @@ const { notFound, errorHandler } = require('./middleware/error.middleware');
 app.use(notFound);
 app.use(errorHandler);
 
-// ─── Start server ─────────────────────────────────────────────────────────────
+// ─── Start server (standalone server vs serverless function) ──────────────────
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+let server;
 
-// A port clash is an everyday development situation, not a crash worth an
-// unhandled 'error' event and a stack trace. Say what happened and how to fix
-// it, then exit cleanly.
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(
-      `\n✖  Port ${PORT} is already in use.\n` +
-      `   Another server is running. Stop it, or start this one on a different port:\n` +
-      `     lsof -ti:${PORT} | xargs kill -9     # stop whatever is using it\n` +
-      `     PORT=5001 npm run dev                # or use another port\n`
-    );
-  } else if (err.code === 'EACCES') {
-    console.error(`\n✖  Not permitted to bind port ${PORT}. Use a port above 1024.\n`);
-  } else {
-    console.error('\n✖  Server failed to start:', err.message, '\n');
-  }
-  process.exit(1);
-});
-
-process.on('SIGTERM', () => {
-  server.close(() => {
-    mongoose.connection.close(false, () => process.exit(0));
+if (process.env.VERCEL) {
+  // In Vercel serverless functions, Vercel invokes the exported app directly
+  console.log('⚡ Running in Vercel serverless mode');
+} else {
+  server = app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    connectDB().catch((err) => console.error('MongoDB initial connection error:', err.message));
   });
-});
 
-process.on('SIGINT', () => {
-  server.close(() => {
-    mongoose.connection.close(false, () => process.exit(0));
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(
+        `\n✖  Port ${PORT} is already in use.\n` +
+        `   Another server is running. Stop it, or start this one on a different port:\n` +
+        `     lsof -ti:${PORT} | xargs kill -9     # stop whatever is using it\n` +
+        `     PORT=5001 npm run dev                # or use another port\n`
+      );
+    } else if (err.code === 'EACCES') {
+      console.error(`\n✖  Not permitted to bind port ${PORT}. Use a port above 1024.\n`);
+    } else {
+      console.error('\n✖  Server failed to start:', err.message, '\n');
+    }
+    process.exit(1);
   });
-});
+
+  process.on('SIGTERM', () => {
+    server?.close(() => {
+      mongoose.connection.close(false, () => process.exit(0));
+    });
+  });
+
+  process.on('SIGINT', () => {
+    server?.close(() => {
+      mongoose.connection.close(false, () => process.exit(0));
+    });
+  });
+}
+
+module.exports = app;

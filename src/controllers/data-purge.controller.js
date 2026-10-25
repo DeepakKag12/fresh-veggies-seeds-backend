@@ -114,6 +114,20 @@ exports.purgeData = async (req, res) => {
     // from wherever the test data left off.
     await Counter.deleteMany({});
 
+    // Invalidate all in-memory caches so stale records are not served
+    try {
+      const cacheService = require('../utils/cache.util');
+      const statsCache = require('../utils/stats-cache.util');
+      const Settings = require('../models/settings.model');
+      cacheService.invalidate('products:');
+      cacheService.invalidate('combos:');
+      cacheService.invalidate('categories:');
+      cacheService.invalidate('banners:');
+      cacheService.invalidate('settings:');
+      statsCache.invalidate('admin:');
+      Settings.invalidateCache();
+    } catch (_) {}
+
     console.warn(
       `⚠️  DATA PURGE by ${account.email} at ${new Date().toISOString()} — ` +
       Object.entries(removed).map(([k, v]) => `${k}:${v}`).join(' ')

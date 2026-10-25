@@ -14,63 +14,63 @@ const categories = [
     slug: 'vegetable-seeds',
     description: 'High-quality organic vegetable seeds for your garden',
     image: 'https://images.unsplash.com/photo-1585664811087-47f65abbad64?w=400',
-    icon: '🥬'
+    icon: '/sandbox-assets/icons/seeds.webp'
   },
   {
     name: 'Flower Seeds',
     slug: 'flower-seeds',
     description: 'Beautiful flower seeds to brighten your garden',
     image: 'https://images.unsplash.com/photo-1490750967868-88aa4486c946?w=400',
-    icon: '🌸'
+    icon: '/sandbox-assets/icons/flowers.png'
   },
   {
     name: 'Grow Bags',
     slug: 'grow-bags',
     description: 'Durable grow bags for container gardening',
     image: 'https://images.unsplash.com/photo-1466692476868-aef1dfb1e735?w=400',
-    icon: '🎒'
+    icon: '/sandbox-assets/icons/pots.webp'
   },
   {
     name: 'Soil & Fertilizers',
     slug: 'soil-fertilizers',
     description: 'Premium soil and organic fertilizers',
     image: 'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?w=400',
-    icon: '🌱'
+    icon: '/sandbox-assets/icons/soils.webp'
   },
   {
     name: 'Tools',
     slug: 'tools',
     description: 'Essential gardening tools and equipment',
     image: 'https://images.unsplash.com/photo-1617576683096-00fc8eecb3af?w=400',
-    icon: '🛠️'
+    icon: '/sandbox-assets/icons/tools.webp'
   },
   {
     name: 'Plants',
     slug: 'plants',
     description: 'Live indoor and outdoor plants, ready to grow',
-    image: '',
-    icon: '🪴'
+    image: 'https://images.unsplash.com/photo-1485955900006-10f4d324d411?auto=format&fit=crop&w=600&q=80',
+    icon: '/sandbox-assets/icons/plants.webp'
   },
   {
     name: 'Fertilizers',
     slug: 'fertilizers',
     description: 'Organic plant food and nutrients for healthy growth',
-    image: '',
-    icon: '🌾'
+    image: 'https://images.unsplash.com/photo-1585320806297-9794b3e4eeae?auto=format&fit=crop&w=600&q=80',
+    icon: '/sandbox-assets/icons/fertilisers.webp'
   },
   {
     name: 'Watering Solutions',
     slug: 'watering-solutions',
     description: 'Watering cans, sprayers and irrigation kits',
-    image: '',
-    icon: '💧'
+    image: 'https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?auto=format&fit=crop&w=600&q=80',
+    icon: '/sandbox-assets/icons/watering.webp'
   },
   {
     name: 'Pest Control',
     slug: 'pest-control',
     description: 'Safe, organic protection against garden pests',
-    image: '',
-    icon: '🐛'
+    image: 'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?auto=format&fit=crop&w=600&q=80',
+    icon: '/sandbox-assets/icons/pest.webp'
   }
 ];
 
@@ -167,6 +167,11 @@ const getProducts = (categoryIds) => [
     discount: 47,
     weight: '10g',
     stock: 200,
+    packages: [
+      { quantity: '50 Seeds', price: 79, stock: 80 },
+      { quantity: '100 Seeds', price: 139, stock: 70 },
+      { quantity: '250 Seeds', price: 299, stock: 50 }
+    ],
     description: 'Premium hybrid tomato seeds with high yield. Disease resistant variety perfect for home gardens. Produces large, juicy tomatoes.',
     images: [
       'https://images.unsplash.com/photo-1546470427-e26264be0b0d?w=600',
@@ -193,6 +198,11 @@ const getProducts = (categoryIds) => [
     discount: 50,
     weight: '8g',
     stock: 180,
+    packages: [
+      { quantity: '8 gm', price: 49, stock: 60 },
+      { quantity: '25 gm', price: 119, stock: 70 },
+      { quantity: '100 gm', price: 349, stock: 50 }
+    ],
     description: 'Fresh cucumber seeds for crisp, juicy cucumbers. Suitable for salads and pickling. Fast-growing variety.',
     images: [
       'https://images.unsplash.com/photo-1568584711271-81bd9c6ed8f7?w=600',
@@ -247,6 +257,11 @@ const getProducts = (categoryIds) => [
     discount: 50,
     weight: '10g',
     stock: 250,
+    packages: [
+      { quantity: '50 Seeds', price: 59, stock: 100 },
+      { quantity: '100 Seeds', price: 99, stock: 100 },
+      { quantity: '25 gm', price: 199, stock: 50 }
+    ],
     description: 'Bright orange and yellow marigold seeds. Easy to grow and perfect for borders and pots. Natural pest repellent.',
     images: [
       'https://images.unsplash.com/photo-1568618090102-0c0e9991c4e1?w=600',

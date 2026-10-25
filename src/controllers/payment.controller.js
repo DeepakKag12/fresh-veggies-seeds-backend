@@ -253,6 +253,9 @@ exports.verifyPayment = async (req, res) => {
     stockService.decrementStockAfterConfirm(order).catch((err) =>
       console.error('⚠️  Stock decrement error (verifyPayment):', err.message)
     );
+    statsCache.invalidate('admin:');
+    statsCache.invalidate('products:');
+    statsCache.invalidate('combos:');
 
     // ── Confirmation to the customer + alert to the admin ────────────────────
     // Fire-and-forget: the payment is already captured, so a mail failure must
@@ -344,6 +347,9 @@ exports.razorpayWebhook = async (req, res) => {
           stockService.decrementStockAfterConfirm(order).catch((err) =>
             console.error('⚠️  Stock decrement error (webhook):', err.message)
           );
+          statsCache.invalidate('admin:');
+          statsCache.invalidate('products:');
+          statsCache.invalidate('combos:');
 
           // This path is what covers a customer who paid then closed the tab
           // before verify-payment ran — they still get their confirmation and
@@ -564,6 +570,9 @@ exports.refundPayment = async (req, res) => {
     await stockService.restoreStockAfterCancel(updatedOrder).catch((err) =>
       console.error('⚠️  Stock restore error (admin refund):', err.message)
     );
+    statsCache.invalidate('admin:');
+    statsCache.invalidate('products:');
+    statsCache.invalidate('combos:');
     if (updatedOrder.couponUsed?.couponId) {
       await couponService.releaseCoupon(updatedOrder.couponUsed.couponId).catch((err) =>
         console.error('⚠️  Coupon release error (admin refund):', err.message)

@@ -31,6 +31,10 @@ const categorySchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
+  },
+  showInCircle: {
+    type: Boolean,
+    default: true
   }
 }, {
   timestamps: true

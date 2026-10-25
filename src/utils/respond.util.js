@@ -12,6 +12,12 @@
  * @param {string} [publicMessage] customer-facing text
  */
 const serverError = (res, error, context, publicMessage = 'Something went wrong. Please try again.') => {
+  if (error?.name === 'CastError') {
+    return res.status(400).json({
+      success: false,
+      message: `Invalid identifier format: ${error.value || error.path}`
+    });
+  }
   console.error(`❌ ${context}:`, error?.message, error?.stack ? `\n${error.stack}` : '');
   return res.status(500).json({ success: false, message: publicMessage });
 };

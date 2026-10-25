@@ -7,7 +7,8 @@ const {
   createReview,
   updateReview,
   approveReview,
-  deleteReview
+  deleteReview,
+  voteHelpful
 } = require('../controllers/review.controller');
 const { protect, admin } = require('../middleware/auth.middleware');
 const validateObjectId = require('../middleware/validate-object-id.middleware');
@@ -17,6 +18,7 @@ router.get('/product/:productId', validateObjectId('productId'), getProductRevie
 router.get('/eligibility/:productId', protect, validateObjectId('productId'), checkReviewEligibility);
 
 router.post('/', protect, createReview);
+router.post('/:id/helpful', validateObjectId('id'), voteHelpful);
 router.put('/:id', protect, validateObjectId('id'), updateReview);
 router.put('/:id/approve', protect, admin, validateObjectId('id'), approveReview);
 router.delete('/:id', protect, admin, validateObjectId('id'), deleteReview);
