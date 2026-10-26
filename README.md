@@ -1,167 +1,99 @@
-<<<<<<< HEAD
-# Fresh Veggies Backend
+# Fresh Veggies — Backend API
 
-Backend API for Fresh Veggies e-commerce platform built with Node.js, Express, and MongoDB.
+Enterprise-grade REST API backend for the **Fresh Veggies** e-commerce platform built with Node.js, Express, MongoDB Atlas, and Mongoose ODM.
 
-## Quick Start
+---
 
-1. Install dependencies:
+## 1. Quick Start
+
+### Installation
 ```bash
+cd backend
 npm install
 ```
 
-2. Set up environment variables:
+### Environment Configuration
 ```bash
 cp .env.example .env
 ```
+Populate `.env` with your MongoDB URI, JWT secret, and integration credentials (Razorpay, Cloudinary, MSG91, Brevo).
 
-3. Configure your `.env` file with MongoDB URI, JWT secret, and Cloudinary credentials.
-
-4. Start development server:
+### Available Scripts
 ```bash
-npm run dev
+npm run dev         # Starts server with nodemon auto-reload on port 5000
+npm run dev:memory  # Starts development server with in-memory MongoDB fallback
+npm run seed        # Seeds database with catalogue products, combos, categories, and settings
+npm start           # Starts production server
 ```
 
-5. Start production server:
-```bash
-npm start
+---
+
+## 2. Architecture & File Structure
+
+```text
+backend/
+├── .env.example
+├── package.json
+├── scripts/
+│   ├── dev-server.js           # Development server bootstrap with memory Mongo fallback
+│   └── seedCatalogue.js        # Production catalogue seeder (vegetable seeds, combos, categories, settings)
+└── src/
+    ├── server.js               # Application bootstrap, CORS, limiters & DB readiness gate
+    ├── config/                 # Cloudinary, Multer, and Order configuration
+    ├── controllers/            # 12 business logic controllers (auth, order, product, payment...)
+    ├── middleware/             # Auth (JWT/RBAC), caching, error handling, objectId validators
+    ├── models/                 # Mongoose schemas with compound indexes & atomic $inc guards
+    ├── routes/                 # Express route modules (*.routes.js)
+    ├── services/               # Authoritative pricing, stock reservation, Razorpay, DTDC, MSG91, Brevo
+    ├── utils/                  # In-memory TTL cache, API error wrappers, response helpers
+    └── validators/             # Indian PIN code and payload schema validators
 ```
 
-## Environment Variables
+---
 
-```
-PORT=5000
-MONGODB_URI=mongodb://localhost:27017/fresh-veggies
-JWT_SECRET=your_jwt_secret_key
-JWT_EXPIRE=30d
-CLOUDINARY_CLOUD_NAME=your_cloud_name
-CLOUDINARY_API_KEY=your_api_key
-CLOUDINARY_API_SECRET=your_api_secret
-CLIENT_URL=http://localhost:3000
-```
-
-## API Documentation
+## 3. Core API Endpoints
 
 Base URL: `http://localhost:5000/api`
 
-### Authentication Routes
-- POST `/auth/register` - Register new user
-- POST `/auth/login` - Login user
-- GET `/auth/me` - Get current user (Protected)
-- PUT `/auth/profile` - Update profile (Protected)
+### Public Catalogue & Discovery
+- `GET /api/settings` — Store settings & dynamic delivery thresholds
+- `GET /api/categories` — Pre-sorted agricultural category listings
+- `GET /api/products` — Paginated catalogue with filters (`?category=`, `?season=`, `?sort=`, `?lowstock=true`, `?outofstock=true`)
+- `GET /api/products/featured` — Featured products
+- `GET /api/products/:id` — Single product details with variant packages
+- `GET /api/combos` — Curated gardening kit combo bundles
+- `GET /api/banners/active` — Active storefront banners
+- `GET /api/orders/check-pincode/:pincode` — Indian Postal PIN code delivery viability
 
-### Product Routes
-- GET `/products` - Get all products with filters
-- GET `/products/featured` - Get featured products
-- GET `/products/:id` - Get single product
-- POST `/products` - Create product (Admin)
-- PUT `/products/:id` - Update product (Admin)
-- DELETE `/products/:id` - Delete product (Admin)
+### Authentication & Profile
+- `POST /api/auth/register` — Customer account creation
+- `POST /api/auth/login` — Dual-identifier (email or phone) login
+- `POST /api/auth/logout` — Revokes session via `tokenVersion`
+- `POST /api/auth/msg91/verify-token` — Instant Guest mobile OTP verification
+- `GET /api/auth/me` — Authenticated profile (Protected)
+- `GET /api/auth/cart` & `PUT /api/auth/cart` — Remote cart persistence
 
-### Category Routes
-- GET `/categories` - Get all categories
-- GET `/categories/:id` - Get single category
-- POST `/categories` - Create category (Admin)
-- PUT `/categories/:id` - Update category (Admin)
-- DELETE `/categories/:id` - Delete category (Admin)
+### Orders & Payments
+- `POST /api/orders` — Places COD order with server-side price check and atomic stock reservation
+- `GET /api/orders/myorders` — Customer order history
+- `POST /api/payments/create-order` — Razorpay online order creation (in paise)
+- `POST /api/payments/verify-payment` — HMAC-SHA256 signature verification & order confirmation
+- `POST /api/payments/webhook` — Asynchronous raw webhook listener
+- `POST /api/coupons/validate` — Server-authoritative discount validation (`orderAmount` / `itemsPrice`)
 
-### Combo Routes
-- GET `/combos` - Get all combos
-- GET `/combos/:id` - Get single combo
-- POST `/combos` - Create combo (Admin)
-- PUT `/combos/:id` - Update combo (Admin)
-- DELETE `/combos/:id` - Delete combo (Admin)
+### Admin Management (`role: admin`)
+- `GET /api/admin/stats` — Revenue, order counts, and inventory KPIs
+- `GET /api/admin/lowstock` — Low-stock products list
+- `GET /api/admin/deleted-items` — Soft-delete recovery ledger
+- `POST /api/admin/deleted-items/:id/restore` — Restores soft-deleted items
+- `GET /api/admin/purge-data/preview` — Danger Zone purge preview (Super Admin)
+- `POST /api/admin/purge-data` — Danger Zone data purge with password gate (Super Admin)
 
-### Order Routes
-- POST `/orders` - Create order (Protected)
-- GET `/orders/myorders` - Get user orders (Protected)
-- GET `/orders/:id` - Get single order (Protected)
-- GET `/orders` - Get all orders (Admin)
-- PUT `/orders/:id/status` - Update order status (Admin)
-- PUT `/orders/:id/cancel` - Cancel order (Protected)
+---
 
-### Admin Routes
-- GET `/admin/stats` - Get dashboard statistics (Admin)
-- GET `/admin/users` - Get all users (Admin)
-- PUT `/admin/users/:id/role` - Update user role (Admin)
-- DELETE `/admin/users/:id` - Delete user (Admin)
-
-### Upload Routes
-- POST `/upload` - Upload image to Cloudinary (Admin)
-- DELETE `/upload/:publicId` - Delete image from Cloudinary (Admin)
-
-## Database Models
-
-### User
-- name, email, phone, password
-- address (street, city, state, pincode)
-- role (customer/admin)
-- isActive status
-
-### Category
-- name, slug, description
-- parentCategory (for nested categories)
-- image, isActive status
-
-### Product
-- name, categoryId, price, weight
-- stock, description, images
-- features, howToGrow, season
-- isCombo, isActive, rating
-
-### Combo
-- name, description, price
-- originalPrice, discount
-- includedProducts array
-- comboType, stock, images
-
-### Order
-- userId, orderItems array
-- shippingAddress
-- paymentMode, paymentStatus
-- orderStatus, totalAmount
-- deliveredAt, cancelledAt
-
-## Error Handling
-
-All routes include error handling middleware that returns:
-```json
-{
-  "success": false,
-  "message": "Error message"
-}
-```
-
-## Authentication
-
-Protected routes require JWT token in Authorization header:
-```
-Authorization: Bearer <token>
-```
-
-Admin routes require user role to be 'admin'.
-
-## File Upload
-
-Images are uploaded to Cloudinary. Supported formats: JPEG, JPG, PNG, WEBP
-Maximum file size: 5MB
-
-## Development
-
-Run with nodemon for auto-reload:
-```bash
-npm run dev
-```
-
-## Production
-
-For production deployment:
-1. Set NODE_ENV=production
-2. Use a process manager like PM2
-3. Set up MongoDB Atlas for database
-4. Configure environment variables
-5. Enable CORS for your frontend domain
-=======
-# fresh-veggies-seeds-backend
-Full-stack e-commerce platform for selling organic seeds, fertilizers, gardening kits, and combo packs with admin product management.
->>>>>>> 622f6be56923ea5b50cb926792a9a7fa71be1ed6
+## 4. Key Security & Resilience Features
+- **Server-Authoritative Pricing:** Cart prices sent by client are never trusted.
+- **Two-Phase Atomic Stock Reservation:** Inventory decrements atomically with automatic rollback cascades on failure.
+- **Session Revocation:** Passwords and logout operations increment `tokenVersion`, instantly invalidating older JWTs.
+- **Timing-Safe Crypto:** Verification routines use `crypto.timingSafeEqual`.
+- **Zero Exposed Secrets:** Production credentials reside exclusively in environment variables.
