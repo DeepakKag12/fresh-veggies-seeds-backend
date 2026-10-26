@@ -35,7 +35,7 @@ exports.validateCoupon = async (code, itemsPrice, userId) => {
   }
 
   const normalized = code.trim().toUpperCase();
-  const coupon = await Coupon.findOne({ code: normalized, isActive: true });
+  const coupon = await Coupon.findOne({ code: normalized, isActive: true, isDeleted: { $ne: true } });
 
   if (!coupon) {
     return { valid: false, message: 'Invalid coupon code.' };

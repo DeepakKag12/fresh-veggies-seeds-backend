@@ -27,7 +27,12 @@ exports.getProducts = async (req, res) => {
     const page     = Math.max(1, parseInt(req.query.page)  || 1);
     const limit    = Math.min(50, Math.max(1, parseInt(req.query.limit) || 12)); // max 50
 
-    const query = { isActive: true };
+    const query = { isDeleted: { $ne: true } };
+
+    // Public storefront only sees active products; admin can see inactive ones too
+    if (req.user?.role !== 'admin') {
+      query.isActive = true;
+    }
 
     // Filter by category — value is a plain string (ObjectId); never an object.
     // An unparseable id used to reach Mongoose and throw a CastError, which the
@@ -145,6 +150,11 @@ exports.getProducts = async (req, res) => {
       }
     }
 
+    const lowstock = req.query.lowstock === 'true';
+    const outofstock = req.query.outofstock === 'true';
+
+    const conditions = [];
+
     // Search by name (with fuzzy matching for misspellings)
     if (search) {
       // Escape special regex characters to prevent ReDoS
@@ -153,12 +163,38 @@ exports.getProducts = async (req, res) => {
 
       const regexPatterns = searchWords.map(word => new RegExp(word, 'i'));
 
-      query.$or = [
-        { name: { $regex: escaped, $options: 'i' } },
-        { description: { $regex: escaped, $options: 'i' } },
-        ...regexPatterns.map(pattern => ({ name: pattern })),
-        ...regexPatterns.map(pattern => ({ description: pattern }))
-      ];
+      conditions.push({
+        $or: [
+          { name: { $regex: escaped, $options: 'i' } },
+          { description: { $regex: escaped, $options: 'i' } },
+          ...regexPatterns.map(pattern => ({ name: pattern })),
+          ...regexPatterns.map(pattern => ({ description: pattern }))
+        ]
+      });
+    }
+
+    // Filter by low stock or out of stock
+    if (lowstock) {
+      const Settings = require('../models/settings.model');
+      const settings = await Settings.findOne().lean();
+      const cutoff = settings?.inventory?.lowStockThreshold ?? 10;
+      conditions.push({
+        $or: [
+          { stock: { $gt: 0, $lte: cutoff } },
+          { 'packages.stock': { $gt: 0, $lte: cutoff } }
+        ]
+      });
+    } else if (outofstock) {
+      conditions.push({
+        $or: [
+          { stock: { $lte: 0 } },
+          { 'packages.stock': { $lte: 0 } }
+        ]
+      });
+    }
+
+    if (conditions.length > 0) {
+      query.$and = conditions;
     }
 
     // Sorting — whitelist only; never allow arbitrary field injection
@@ -169,7 +205,9 @@ exports.getProducts = async (req, res) => {
     else sortOption.createdAt = -1;
 
     // ── In-Memory Cache Lookup ───────────────────────────────────────────────
-    const cacheKey = `products:list:${category || 'all'}:${season || 'all'}:${search ? encodeURIComponent(search.toLowerCase()) : 'none'}:${sort || 'default'}:${page}:${limit}`;
+    const roleKey = req.user?.role === 'admin' ? 'admin' : 'public';
+    const stockKey = lowstock ? 'low' : outofstock ? 'out' : 'all';
+    const cacheKey = `products:list:${roleKey}:${stockKey}:${category || 'all'}:${season || 'all'}:${search ? encodeURIComponent(search.toLowerCase()) : 'none'}:${sort || 'default'}:${page}:${limit}`;
     const cached = cacheService.get(cacheKey);
     if (cached) {
       return res.status(200).json(cached);
@@ -232,7 +270,10 @@ exports.getProduct = async (req, res) => {
       return res.status(200).json(cached);
     }
 
-    const product = await Product.findById(req.params.id)
+    const product = await Product.findOne({
+      _id: req.params.id,
+      isDeleted: { $ne: true }
+    })
       .populate('categoryId', 'name slug')
       .lean();
 
@@ -266,6 +307,16 @@ exports.createProduct = async (req, res) => {
     }
     const product = await Product.create(req.body);
 
+    const auditService = require('../services/audit.service');
+    auditService.logAction({
+      req,
+      action: 'CREATE',
+      entityType: 'Product',
+      entityId: product._id,
+      entityName: product.name,
+      details: { price: product.price, stock: product.stock, categoryId: product.categoryId }
+    }).catch(() => {});
+
     cacheService.invalidate('products:');
     cacheService.invalidate('combos:');
     cacheService.invalidate('categories:');
@@ -288,8 +339,8 @@ exports.updateProduct = async (req, res) => {
     if (req.body.packages && Array.isArray(req.body.packages) && req.body.packages.length > 0) {
       req.body.stock = req.body.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
     }
-    const product = await Product.findByIdAndUpdate(
-      req.params.id,
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
       { new: true, runValidators: true }
     );
@@ -300,6 +351,20 @@ exports.updateProduct = async (req, res) => {
         message: 'Product not found'
       });
     }
+
+    const auditService = require('../services/audit.service');
+    auditService.logAction({
+      req,
+      action: req.body.stock !== undefined ? 'STOCK_CHANGE' : req.body.price !== undefined ? 'PRICE_CHANGE' : 'UPDATE',
+      entityType: 'Product',
+      entityId: product._id,
+      entityName: product.name,
+      details: {
+        updatedFields: Object.keys(req.body),
+        price: product.price,
+        stock: product.stock
+      }
+    }).catch(() => {});
 
     cacheService.invalidate('products:');
     cacheService.invalidate('combos:');
@@ -321,15 +386,21 @@ exports.updateProduct = async (req, res) => {
 exports.deleteProduct = async (req, res) => {
   try {
     const Combo = require('../models/combo.model');
-    const inCombos = await Combo.countDocuments({ 'includedProducts.productId': req.params.id });
+    const inCombos = await Combo.countDocuments({
+      'includedProducts.productId': req.params.id,
+      isDeleted: { $ne: true }
+    });
     if (inCombos > 0) {
       return res.status(400).json({
         success: false,
-        message: `Cannot delete product: it is included in ${inCombos} combo(s). Please remove it from combo package(s) first.`
+        message: `Cannot delete product: it is included in ${inCombos} active combo(s). Please remove it from combo package(s) first.`
       });
     }
 
-    const product = await Product.findByIdAndDelete(req.params.id);
+    const product = await Product.findOne({
+      _id: req.params.id,
+      isDeleted: { $ne: true }
+    });
 
     if (!product) {
       return res.status(404).json({
@@ -338,9 +409,24 @@ exports.deleteProduct = async (req, res) => {
       });
     }
 
-    // Cascade delete reviews for this product so orphaned reviews do not remain
-    const Review = require('../models/review.model');
-    await Review.deleteMany({ productId: req.params.id });
+    const deletionReason = req.body?.reason || req.query?.reason || 'Manual administrative deletion';
+    product.isDeleted = true;
+    product.isActive = false;
+    product.deletedAt = new Date();
+    product.deletedBy = req.user?._id;
+    product.deletionReason = deletionReason;
+    await product.save();
+
+    // Record in DeleteHistory recovery ledger & AuditLog
+    const auditService = require('../services/audit.service');
+    await auditService.logDeletion({
+      req,
+      entityType: 'Product',
+      entityId: product._id,
+      entityName: product.name,
+      deletionReason,
+      snapshot: product.toObject()
+    });
 
     cacheService.invalidate('products:');
     cacheService.invalidate('combos:');
@@ -349,7 +435,7 @@ exports.deleteProduct = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: 'Product deleted successfully'
+      message: `Product "${product.name}" moved to Delete History. It can be restored anytime.`
     });
   } catch (error) {
     return serverError(res, error, 'productController.js → deleteProduct');
@@ -366,7 +452,7 @@ exports.getFeaturedProducts = async (req, res) => {
       return res.status(200).json(cached);
     }
 
-    const products = await Product.find({ isActive: true })
+    const products = await Product.find({ isActive: true, isDeleted: { $ne: true } })
       .sort({ rating: -1 })
       .limit(8)
       .populate('categoryId', 'name slug')

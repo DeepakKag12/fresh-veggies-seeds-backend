@@ -421,7 +421,7 @@ exports.getAllOrders = async (req, res) => {
 // @access  Private/Admin
 exports.updateOrderStatus = async (req, res) => {
   try {
-    const { orderStatus, note } = req.body;
+    const { orderStatus, note, shipping } = req.body;
 
     const VALID_STATUSES = [
       'Pending',
@@ -444,7 +444,7 @@ exports.updateOrderStatus = async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     const previousStatus = order.orderStatus;
-    if (previousStatus === orderStatus) {
+    if (previousStatus === orderStatus && !shipping) {
       return res.status(200).json({
         success: true,
         data: order,
@@ -454,13 +454,30 @@ exports.updateOrderStatus = async (req, res) => {
 
     order.orderStatus = orderStatus;
 
+    // Save dispatch / tracking info if provided (e.g. Courier partner, AWB number)
+    if (shipping && typeof shipping === 'object') {
+      if (!order.shipping) order.shipping = {};
+      if (shipping.courierName) order.shipping.courierName = shipping.courierName;
+      if (shipping.awbNumber) order.shipping.awbNumber = shipping.awbNumber;
+      if (shipping.trackingUrl) order.shipping.trackingUrl = shipping.trackingUrl;
+      if (orderStatus === 'Shipped' && !order.shipping.shippedAt) {
+        order.shipping.shippedAt = new Date();
+      }
+    }
+
     // Append-only audit trail — who moved this order, when, from what, and why.
+    const auditNote = note || (
+      shipping?.awbNumber
+        ? `Marked as ${orderStatus} via ${shipping.courierName || 'Courier'} (AWB: ${shipping.awbNumber})`
+        : `Status updated from ${previousStatus} to ${orderStatus} by admin`
+    );
+
     order.statusHistory.push({
       status:    orderStatus,
       from:      previousStatus,
       changedAt: new Date(),
       changedBy: req.user._id,
-      note:      note || `Status updated from ${previousStatus} to ${orderStatus} by admin`
+      note:      auditNote
     });
 
     // Delivered handling
@@ -1045,6 +1062,58 @@ exports.checkPincodeServiceability = async (req, res) => {
     });
   } catch (error) {
     return serverError(res, error, 'orderController.js → checkPincodeServiceability');
+  }
+};
+
+// @desc    Delete an order (Admin)
+// @route   DELETE /api/orders/:id
+// @access  Private/Admin
+exports.deleteOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid order ID format.' });
+    }
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    // If stock was decremented and has not yet been restored, restore it back to inventory
+    if (order.stockDecremented && !order.stockRestored && order.orderStatus !== 'Cancelled') {
+      try {
+        await stockService.restoreStockAfterCancel(order);
+      } catch (stockErr) {
+        console.error('⚠️  Failed to restore stock on order deletion:', stockErr.message);
+      }
+    }
+
+    const orderNum = order.orderNumber || order._id.toString().slice(-6).toUpperCase();
+
+    // Record in DeleteHistory recovery ledger & AuditLog
+    const auditService = require('../services/audit.service');
+    await auditService.logDeletion({
+      req,
+      entityType: 'Order',
+      entityId: order._id,
+      entityName: `Order #${orderNum}`,
+      deletionReason: req.body?.reason || req.query?.reason || 'Order removed by administrator',
+      snapshot: order.toObject()
+    });
+
+    await Order.findByIdAndDelete(id);
+
+    // Invalidate caches
+    statsCache.invalidate('admin:');
+    statsCache.invalidate('orders:');
+
+    return res.status(200).json({
+      success: true,
+      message: `Order #${orderNum} deleted and moved to Delete History.`
+    });
+  } catch (error) {
+    return serverError(res, error, 'orderController.js → deleteOrder');
   }
 };
 

@@ -1,4 +1,5 @@
 const Category = require('../models/category.model');
+const auditService = require('../services/audit.service');
 const cacheService = require('../utils/cache.util');
 const { serverError } = require('../utils/respond.util');
 
@@ -16,7 +17,9 @@ exports.getCategories = async (req, res) => {
       }
     }
 
-    const filter = includeAll ? {} : { isActive: true };
+    const filter = includeAll
+      ? { isDeleted: { $ne: true } }
+      : { isActive: true, isDeleted: { $ne: true } };
     const categories = await Category.find(filter)
       .populate('parentCategory', 'name slug')
       .sort({ name: 1 }) // Sort alphabetically by name
@@ -62,7 +65,7 @@ exports.getCategories = async (req, res) => {
 // @access  Public
 exports.getCategory = async (req, res) => {
   try {
-    const category = await Category.findById(req.params.id)
+    const category = await Category.findOne({ _id: req.params.id, isDeleted: { $ne: true } })
       .populate('parentCategory', 'name slug')
       .lean();
 
@@ -92,6 +95,17 @@ exports.createCategory = async (req, res) => {
     cacheService.invalidate('categories:');
     cacheService.invalidate('products:');
 
+    // Audit log
+    await auditService.logAction({
+      actor: req.user,
+      action: 'CREATE',
+      entityType: 'Category',
+      entityId: category._id,
+      entityName: category.name,
+      details: { name: category.name, slug: category.slug },
+      ipAddress: req.ip
+    });
+
     res.status(201).json({
       success: true,
       data: category
@@ -111,8 +125,8 @@ exports.updateCategory = async (req, res) => {
       req.body.slug = req.body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
     }
 
-    const category = await Category.findByIdAndUpdate(
-      req.params.id,
+    const category = await Category.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
       { new: true, runValidators: true }
     );
@@ -127,6 +141,17 @@ exports.updateCategory = async (req, res) => {
     cacheService.invalidate('categories:');
     cacheService.invalidate('products:');
 
+    // Audit log
+    await auditService.logAction({
+      actor: req.user,
+      action: 'UPDATE',
+      entityType: 'Category',
+      entityId: category._id,
+      entityName: category.name,
+      details: req.body,
+      ipAddress: req.ip
+    });
+
     res.status(200).json({
       success: true,
       data: category
@@ -136,21 +161,24 @@ exports.updateCategory = async (req, res) => {
   }
 };
 
-// @desc    Delete category
+// @desc    Delete category (Soft delete with recovery ledger)
 // @route   DELETE /api/categories/:id
 // @access  Private/Admin
 exports.deleteCategory = async (req, res) => {
   try {
     const Product = require('../models/product.model');
-    const associatedProducts = await Product.countDocuments({ categoryId: req.params.id });
+    const associatedProducts = await Product.countDocuments({
+      categoryId: req.params.id,
+      isDeleted: { $ne: true }
+    });
     if (associatedProducts > 0) {
       return res.status(400).json({
         success: false,
-        message: `Cannot delete category: ${associatedProducts} product(s) are still assigned to it. Please reassign or delete them first.`
+        message: `Cannot delete category: ${associatedProducts} active product(s) are still assigned to it. Please reassign or delete them first.`
       });
     }
 
-    const category = await Category.findByIdAndDelete(req.params.id);
+    const category = await Category.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!category) {
       return res.status(404).json({
@@ -159,12 +187,30 @@ exports.deleteCategory = async (req, res) => {
       });
     }
 
+    category.isDeleted = true;
+    category.isActive = false;
+    category.deletedAt = new Date();
+    category.deletedBy = req.user ? req.user._id : null;
+    category.deletionReason = req.body?.reason || 'Category removed by administrator';
+    await category.save();
+
+    // Ledger deletion & audit log
+    await auditService.logDeletion({
+      actor: req.user,
+      entityType: 'Category',
+      entityId: category._id,
+      entityName: category.name,
+      snapshot: category.toObject(),
+      reason: category.deletionReason,
+      ipAddress: req.ip
+    });
+
     cacheService.invalidate('categories:');
     cacheService.invalidate('products:');
 
     res.status(200).json({
       success: true,
-      message: 'Category deleted successfully'
+      message: 'Category moved to Delete History. It can be safely restored at any time.'
     });
   } catch (error) {
     return serverError(res, error, 'categoryController.js → deleteCategory');

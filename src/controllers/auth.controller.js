@@ -12,9 +12,16 @@ const requireEmailVerification = () =>
 
 const { serverError } = require('../utils/respond.util');
 
-const getFrontendUrl = () => (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes('localhost'))
-  ? process.env.FRONTEND_URL
-  : 'https://fresh-veggies-seeds-frontend.vercel.app';
+const getFrontendUrl = () => {
+  if (process.env.FRONTEND_URL) {
+    if (process.env.NODE_ENV === 'development' || !process.env.FRONTEND_URL.includes('localhost')) {
+      return process.env.FRONTEND_URL;
+    }
+  }
+  return process.env.NODE_ENV === 'production'
+    ? 'https://fresh-veggies-seeds-frontend.vercel.app'
+    : 'http://localhost:3000';
+};
 
 // Generate JWT Token.
 // `tv` pins the token to the user's current tokenVersion, so a password change
@@ -604,11 +611,8 @@ exports.forgotPassword = async (req, res) => {
     const resetToken = user.generatePasswordResetToken();
     await user.save({ validateBeforeSave: false });
 
-    // Create reset URL - use production URL, not localhost
-    const frontendUrl = (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes('localhost'))
-      ? process.env.FRONTEND_URL
-      : 'https://fresh-veggies-seeds-frontend.vercel.app';
-    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
+    // Create reset URL
+    const resetUrl = `${getFrontendUrl()}/reset-password/${resetToken}`;
 
     // Send email
     const emailResult = await emailService.sendForgotPasswordEmail(user, resetToken, resetUrl);

@@ -1,4 +1,5 @@
 const Banner = require('../models/banner.model');
+const auditService = require('../services/audit.service');
 const cacheService = require('../utils/cache.util');
 const { serverError } = require('../utils/respond.util');
 
@@ -7,7 +8,7 @@ const { serverError } = require('../utils/respond.util');
 // @access  Private/Admin
 exports.getAllBanners = async (req, res) => {
   try {
-    const banners = await Banner.find().sort({ position: 1, order: 1 }).lean();
+    const banners = await Banner.find({ isDeleted: { $ne: true } }).sort({ position: 1, order: 1 }).lean();
 
     res.status(200).json({
       success: true,
@@ -35,6 +36,7 @@ exports.getActiveBanners = async (req, res) => {
 
     const query = {
       isActive: true,
+      isDeleted: { $ne: true },
       $and: [
         {
           $or: [
@@ -111,6 +113,16 @@ exports.createBanner = async (req, res) => {
 
     cacheService.invalidate('banners:');
 
+    await auditService.logAction({
+      actor: req.user,
+      action: 'CREATE',
+      entityType: 'Banner',
+      entityId: banner._id,
+      entityName: banner.title || 'Banner',
+      details: { title: banner.title, position: banner.position },
+      ipAddress: req.ip
+    });
+
     res.status(201).json({
       success: true,
       data: banner
@@ -125,8 +137,8 @@ exports.createBanner = async (req, res) => {
 // @access  Private/Admin
 exports.updateBanner = async (req, res) => {
   try {
-    const banner = await Banner.findByIdAndUpdate(
-      req.params.id,
+    const banner = await Banner.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
       { new: true, runValidators: true }
     );
@@ -140,6 +152,16 @@ exports.updateBanner = async (req, res) => {
 
     cacheService.invalidate('banners:');
 
+    await auditService.logAction({
+      actor: req.user,
+      action: 'UPDATE',
+      entityType: 'Banner',
+      entityId: banner._id,
+      entityName: banner.title || 'Banner',
+      details: req.body,
+      ipAddress: req.ip
+    });
+
     res.status(200).json({
       success: true,
       data: banner
@@ -149,12 +171,12 @@ exports.updateBanner = async (req, res) => {
   }
 };
 
-// @desc    Delete banner
+// @desc    Delete banner (Soft delete with recovery ledger)
 // @route   DELETE /api/banners/:id
 // @access  Private/Admin
 exports.deleteBanner = async (req, res) => {
   try {
-    const banner = await Banner.findByIdAndDelete(req.params.id);
+    const banner = await Banner.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!banner) {
       return res.status(404).json({
@@ -163,11 +185,28 @@ exports.deleteBanner = async (req, res) => {
       });
     }
 
+    banner.isDeleted = true;
+    banner.isActive = false;
+    banner.deletedAt = new Date();
+    banner.deletedBy = req.user ? req.user._id : null;
+    banner.deletionReason = req.body?.reason || 'Banner removed by administrator';
+    await banner.save();
+
+    await auditService.logDeletion({
+      actor: req.user,
+      entityType: 'Banner',
+      entityId: banner._id,
+      entityName: banner.title || 'Banner',
+      snapshot: banner.toObject(),
+      reason: banner.deletionReason,
+      ipAddress: req.ip
+    });
+
     cacheService.invalidate('banners:');
 
     res.status(200).json({
       success: true,
-      message: 'Banner deleted successfully'
+      message: 'Banner moved to Delete History. It can be safely restored at any time.'
     });
   } catch (error) {
     return serverError(res, error, 'bannerController.js → deleteBanner');

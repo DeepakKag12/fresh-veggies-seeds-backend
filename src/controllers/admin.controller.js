@@ -3,6 +3,7 @@ const Order = require('../models/order.model');
 const Product = require('../models/product.model');
 const Review = require('../models/review.model');
 const Settings = require('../models/settings.model');
+const auditService = require('../services/audit.service');
 const statsCache = require('../utils/stats-cache.util');
 const { serverError } = require('../utils/respond.util');
 
@@ -42,7 +43,7 @@ exports.getDashboardStats = async (req, res) => {
     ] = await Promise.all([
       Order.countDocuments(realOrder),
       User.countDocuments({ role: 'customer' }),
-      Product.countDocuments(),
+      Product.countDocuments({ isDeleted: { $ne: true } }),
 
       // Single aggregation to get counts for all statuses in 1 query
       Order.aggregate([
@@ -51,8 +52,8 @@ exports.getDashboardStats = async (req, res) => {
       ]),
 
       Order.countDocuments({ paymentStatus: 'Failed' }),
-      Product.countDocuments({ stock: { $gt: 0, $lte: lowStockCutoff } }),
-      Product.countDocuments({ stock: { $lte: 0 } }),
+      Product.countDocuments({ isDeleted: { $ne: true }, stock: { $gt: 0, $lte: lowStockCutoff } }),
+      Product.countDocuments({ isDeleted: { $ne: true }, stock: { $lte: 0 } }),
       Review.countDocuments({ isApproved: false, status: { $ne: 'rejected' } }),
       Order.countDocuments({ ...realOrder, createdAt: { $gte: today } }),
       User.countDocuments({ role: 'customer', createdAt: { $gte: today } }),
@@ -253,6 +254,16 @@ exports.updateUserRole = async (req, res) => {
       { new: true, runValidators: true }
     ).select('name email phone role isActive');
 
+    // Audit log
+    auditService.logAction({
+      req,
+      action: 'ROLE_CHANGE',
+      entityType: 'User',
+      entityId: user._id,
+      entityName: user.name,
+      details: { previousRole: target.role, newRole: role }
+    }).catch(() => {});
+
     res.status(200).json({ success: true, data: user });
   } catch (error) {
     console.error('updateUserRole error:', error.message);
@@ -292,12 +303,31 @@ exports.deleteUser = async (req, res) => {
         { _id: user._id },
         { $set: { isActive: false }, $inc: { tokenVersion: 1 } }  // also ends their sessions
       );
+
+      auditService.logAction({
+        req,
+        action: 'UPDATE',
+        entityType: 'User',
+        entityId: user._id,
+        entityName: user.name,
+        details: { action: 'DEACTIVATED', reason: 'User has existing orders' }
+      }).catch(() => {});
+
       return res.status(200).json({
         success: true,
         message: `${user.name} has ${orderCount} order(s), so the account was deactivated rather than deleted to preserve order history.`,
         data: { deactivated: true, orderCount }
       });
     }
+
+    await auditService.logDeletion({
+      req,
+      entityType: 'User',
+      entityId: user._id,
+      entityName: user.name,
+      deletionReason: 'Account removed by administrator',
+      snapshot: user.toObject()
+    });
 
     await User.findByIdAndDelete(user._id);
     res.status(200).json({ success: true, message: 'User deleted successfully', data: { deactivated: false } });
@@ -749,7 +779,7 @@ exports.getSalesAnalytics = async (req, res) => {
         ]),
 
         // 9. Stock Depletion & Velocity Risk Check
-        Product.find({ isActive: true, stock: { $lte: 15 } })
+        Product.find({ isActive: true, isDeleted: { $ne: true }, stock: { $lte: 15 } })
           .select('name stock price categoryId images')
           .populate('categoryId', 'name')
           .sort({ stock: 1 })
@@ -811,7 +841,8 @@ exports.getLowStockProducts = async (req, res) => {
     const threshold = parseInt(req.query.threshold) || 10;
     
     const products = await Product.find({
-      isActive: true
+      isActive: true,
+      isDeleted: { $ne: true }
     })
       .populate('categoryId', 'name')
       .lean();

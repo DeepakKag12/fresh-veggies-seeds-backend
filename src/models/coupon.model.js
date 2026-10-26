@@ -4,7 +4,6 @@ const couponSchema = new mongoose.Schema({
   code: {
     type: String,
     required: true,
-    unique: true,
     uppercase: true,
     trim: true
   },
@@ -61,7 +60,25 @@ const couponSchema = new mongoose.Schema({
   applicableProducts: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product'
-  }]
+  }],
+  isDeleted: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  deletedAt: {
+    type: Date,
+    default: null
+  },
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  deletionReason: {
+    type: String,
+    default: ''
+  }
 }, {
   timestamps: true
 });
@@ -69,6 +86,7 @@ const couponSchema = new mongoose.Schema({
 // Index for faster queries
 couponSchema.index({ expiryDate: 1 });
 couponSchema.index({ code: 1, isActive: 1 });
+couponSchema.index({ code: 1 }, { unique: true, partialFilterExpression: { isDeleted: false } });
 couponSchema.index({ isActive: 1, startDate: 1, expiryDate: 1 });
 couponSchema.index({ createdAt: -1 });
 

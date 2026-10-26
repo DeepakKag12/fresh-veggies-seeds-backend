@@ -167,6 +167,12 @@ async function runAdminCrudTests() {
   await orderController.deleteTrackingHistoryItem({ params: { id: 'invalid-id', trackingId: 'invalid-tid' } }, delTrackRes1);
   assert(delTrackRes1.statusCode === 400, 'deleteTrackingHistoryItem: rejects invalid tracking ID with 400');
 
+  // Full Order deletion (Admin)
+  assert(typeof orderController.deleteOrder === 'function', 'orderController: exports deleteOrder');
+  const delOrderRes1 = createMockRes();
+  await orderController.deleteOrder({ params: { id: 'invalid-id' } }, delOrderRes1);
+  assert(delOrderRes1.statusCode === 400, 'deleteOrder: rejects invalid ObjectId with 400');
+
   // ─────────────────────────────────────────────────────────────
   // 7. USER ADMIN OPERATIONS & ROLE CONTROLS
   // ─────────────────────────────────────────────────────────────
@@ -265,6 +271,70 @@ async function runAdminCrudTests() {
   const cRes4 = createMockRes();
   await contactController.updateInquiryStatus({ params: { id: 'some-id' }, body: { status: 'invalid_status' } }, cRes4);
   assert(cRes4.statusCode === 400, 'updateInquiryStatus: rejects invalid status string with 400');
+
+  // ─────────────────────────────────────────────────────────────
+  // 12. DELETE HISTORY, AUDIT LOGS & RECOVERY (SECTION 20)
+  // ─────────────────────────────────────────────────────────────
+  console.log(cyan(bold('\n▶ 12. Delete History, Audit Trails & Recovery (Section 20)')));
+  const deleteHistoryController = require('../src/controllers/delete-history.controller');
+  const auditService = require('../src/services/audit.service');
+  const DeleteHistory = require('../src/models/delete-history.model');
+  const AuditLog = require('../src/models/audit-log.model');
+
+  // Verify controller exports
+  assert(typeof deleteHistoryController.getDeleteHistory === 'function', 'deleteHistoryController: exports getDeleteHistory');
+  assert(typeof deleteHistoryController.getDeleteRecord === 'function', 'deleteHistoryController: exports getDeleteRecord');
+  assert(typeof deleteHistoryController.restoreDeletedRecord === 'function', 'deleteHistoryController: exports restoreDeletedRecord');
+  assert(typeof deleteHistoryController.permanentlyDeleteRecord === 'function', 'deleteHistoryController: exports permanentlyDeleteRecord');
+  assert(typeof deleteHistoryController.getAuditLogs === 'function', 'deleteHistoryController: exports getAuditLogs');
+  assert(typeof deleteHistoryController.getAuditStats === 'function', 'deleteHistoryController: exports getAuditStats');
+
+  // Verify audit service exports
+  assert(typeof auditService.logAction === 'function', 'auditService: exports logAction');
+  assert(typeof auditService.logDeletion === 'function', 'auditService: exports logDeletion');
+  assert(typeof auditService.logRestoration === 'function', 'auditService: exports logRestoration');
+  assert(typeof auditService.logPermanentDeletion === 'function', 'auditService: exports logPermanentDeletion');
+
+  // Verify DeleteHistory schema paths
+  const dhPaths = DeleteHistory.schema.paths;
+  assert(Boolean(dhPaths.entityType), 'DeleteHistory schema: contains entityType');
+  assert(Boolean(dhPaths.entityId), 'DeleteHistory schema: contains entityId');
+  assert(Boolean(dhPaths.entityName), 'DeleteHistory schema: contains entityName');
+  assert(Boolean(dhPaths['deletedBy.name'] || dhPaths.deletedBy), 'DeleteHistory schema: contains deletedBy');
+  assert(Boolean(dhPaths.deletionReason), 'DeleteHistory schema: contains deletionReason');
+  assert(Boolean(dhPaths.recoveryStatus), 'DeleteHistory schema: contains recoveryStatus');
+  assert(Boolean(dhPaths.snapshot), 'DeleteHistory schema: contains snapshot payload');
+
+  // Verify AuditLog schema paths
+  const alPaths = AuditLog.schema.paths;
+  assert(Boolean(alPaths['actor.name'] || alPaths.actor), 'AuditLog schema: contains actor');
+  assert(Boolean(alPaths.action), 'AuditLog schema: contains action');
+  assert(Boolean(alPaths.entityType), 'AuditLog schema: contains entityType');
+  assert(Boolean(alPaths.entityId), 'AuditLog schema: contains entityId');
+  assert(Boolean(alPaths.details), 'AuditLog schema: contains details');
+  assert(Boolean(alPaths.ipAddress), 'AuditLog schema: contains ipAddress');
+
+  // Verify entity models soft-delete support
+  const ProductModel = require('../src/models/product.model');
+  const CategoryModel = require('../src/models/category.model');
+  const ComboModel = require('../src/models/combo.model');
+  const CouponModel = require('../src/models/coupon.model');
+  const BannerModel = require('../src/models/banner.model');
+
+  assert(Boolean(ProductModel.schema.paths.isDeleted), 'Product model: schema has isDeleted soft-delete flag');
+  assert(Boolean(CategoryModel.schema.paths.isDeleted), 'Category model: schema has isDeleted soft-delete flag');
+  assert(Boolean(ComboModel.schema.paths.isDeleted), 'Combo model: schema has isDeleted soft-delete flag');
+  assert(Boolean(CouponModel.schema.paths.isDeleted), 'Coupon model: schema has isDeleted soft-delete flag');
+  assert(Boolean(BannerModel.schema.paths.isDeleted), 'Banner model: schema has isDeleted soft-delete flag');
+
+  // Verify Order and User in DeleteHistory and AuditLog enums
+  const dhEnums = DeleteHistory.schema.path('entityType').enumValues || [];
+  assert(dhEnums.includes('Order'), 'DeleteHistory entityType enum: includes "Order" for recovery');
+  assert(dhEnums.includes('User'), 'DeleteHistory entityType enum: includes "User" for recovery');
+
+  const alActions = AuditLog.schema.path('action').enumValues || [];
+  assert(alActions.includes('ROLE_CHANGE'), 'AuditLog action enum: includes "ROLE_CHANGE"');
+  assert(alActions.includes('STATUS_CHANGE'), 'AuditLog action enum: includes "STATUS_CHANGE"');
 
   // ─────────────────────────────────────────────────────────────
   // SUMMARY

@@ -14,7 +14,8 @@ const {
   checkPincodeServiceability,
   deleteStatusHistoryItem,
   bulkDeleteStatusHistory,
-  deleteTrackingHistoryItem
+  deleteTrackingHistoryItem,
+  deleteOrder
 } = require('../controllers/order.controller');
 const { protect, admin } = require('../middleware/auth.middleware');
 const validateObjectId = require('../middleware/validate-object-id.middleware');
@@ -30,7 +31,8 @@ router.get('/myorders', protect, getMyOrders);
 
 // All /:id routes share ObjectId validation
 router.route('/:id')
-  .get(protect, validateObjectId, getOrder);
+  .get(protect, validateObjectId, getOrder)
+  .delete(protect, admin, validateObjectId, deleteOrder);
 
 router.put('/:id/status', protect, admin, validateObjectId, updateOrderStatus);
 

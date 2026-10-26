@@ -1,5 +1,6 @@
 const Coupon = require('../models/coupon.model');
 const couponService = require('../services/coupon.service');
+const auditService = require('../services/audit.service');
 const cacheService = require('../utils/cache.util');
 const { serverError } = require('../utils/respond.util');
 
@@ -8,7 +9,7 @@ const { serverError } = require('../utils/respond.util');
 // @access  Private/Admin
 exports.getAllCoupons = async (req, res) => {
   try {
-    const coupons = await Coupon.find()
+    const coupons = await Coupon.find({ isDeleted: { $ne: true } })
       .populate('applicableCategories', 'name')
       .populate('applicableProducts', 'name')
       .sort({ createdAt: -1 })
@@ -37,6 +38,7 @@ exports.getActiveCoupons = async (req, res) => {
     const now = new Date();
     const coupons = await Coupon.find({
         isActive: true,
+        isDeleted: { $ne: true },
         startDate: { $lte: now },
         expiryDate: { $gte: now }
       })
@@ -93,6 +95,16 @@ exports.createCoupon = async (req, res) => {
     const coupon = await Coupon.create(req.body);
     cacheService.invalidate('coupons:');
 
+    await auditService.logAction({
+      actor: req.user,
+      action: 'CREATE',
+      entityType: 'Coupon',
+      entityId: coupon._id,
+      entityName: coupon.code,
+      details: { code: coupon.code, discountType: coupon.discountType, discountValue: coupon.discountValue },
+      ipAddress: req.ip
+    });
+
     res.status(201).json({
       success: true,
       data: coupon
@@ -107,8 +119,8 @@ exports.createCoupon = async (req, res) => {
 // @access  Private/Admin
 exports.updateCoupon = async (req, res) => {
   try {
-    const coupon = await Coupon.findByIdAndUpdate(
-      req.params.id,
+    const coupon = await Coupon.findOneAndUpdate(
+      { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
       { new: true, runValidators: true }
     );
@@ -122,6 +134,16 @@ exports.updateCoupon = async (req, res) => {
 
     cacheService.invalidate('coupons:');
 
+    await auditService.logAction({
+      actor: req.user,
+      action: 'UPDATE',
+      entityType: 'Coupon',
+      entityId: coupon._id,
+      entityName: coupon.code,
+      details: req.body,
+      ipAddress: req.ip
+    });
+
     res.status(200).json({
       success: true,
       data: coupon
@@ -131,12 +153,12 @@ exports.updateCoupon = async (req, res) => {
   }
 };
 
-// @desc    Delete coupon
+// @desc    Delete coupon (Soft delete with recovery ledger)
 // @route   DELETE /api/coupons/:id
 // @access  Private/Admin
 exports.deleteCoupon = async (req, res) => {
   try {
-    const coupon = await Coupon.findByIdAndDelete(req.params.id);
+    const coupon = await Coupon.findOne({ _id: req.params.id, isDeleted: { $ne: true } });
 
     if (!coupon) {
       return res.status(404).json({
@@ -145,11 +167,28 @@ exports.deleteCoupon = async (req, res) => {
       });
     }
 
+    coupon.isDeleted = true;
+    coupon.isActive = false;
+    coupon.deletedAt = new Date();
+    coupon.deletedBy = req.user ? req.user._id : null;
+    coupon.deletionReason = req.body?.reason || 'Coupon removed by administrator';
+    await coupon.save();
+
+    await auditService.logDeletion({
+      actor: req.user,
+      entityType: 'Coupon',
+      entityId: coupon._id,
+      entityName: coupon.code,
+      snapshot: coupon.toObject(),
+      reason: coupon.deletionReason,
+      ipAddress: req.ip
+    });
+
     cacheService.invalidate('coupons:');
 
     res.status(200).json({
       success: true,
-      message: 'Coupon deleted successfully'
+      message: 'Coupon moved to Delete History. It can be safely restored at any time.'
     });
   } catch (error) {
     return serverError(res, error, 'couponController.js → deleteCoupon');
