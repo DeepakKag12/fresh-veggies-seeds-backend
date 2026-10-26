@@ -385,7 +385,8 @@ exports.syncCart = async (req, res) => {
     }
 
     user.cart = mergedCart;
-    await user.save();
+    user.markModified('cart');
+    await user.save({ validateBeforeSave: false });
 
     res.status(200).json({
       success: true,
