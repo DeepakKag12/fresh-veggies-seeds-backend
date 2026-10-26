@@ -283,7 +283,7 @@ exports.razorpayWebhook = async (req, res) => {
   try {
     // Revenue figures on the dashboard change here.
     statsCache.invalidate('admin:');
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || (process.env.NODE_ENV === 'development' ? 'dev_razorpay_webhook_secret_9988' : null);
 
     // ── Verify webhook signature ──────────────────────────────────────────────
     // req.body is a raw Buffer from express.raw() — must be used as-is for HMAC

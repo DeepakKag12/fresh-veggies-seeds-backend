@@ -63,7 +63,8 @@ exports.getActiveCoupons = async (req, res) => {
 // @access   Private
 exports.validateCoupon = async (req, res) => {
   try {
-    const { code, orderAmount } = req.body;
+    const { code } = req.body;
+    const orderAmount = req.body.orderAmount ?? req.body.itemsPrice ?? 0;
 
     // Delegates to couponService so this preview and the discount actually
     // applied at checkout can never disagree — they run the same code.
