@@ -25,7 +25,8 @@ const orderSchema = new mongoose.Schema({
     productType: {
       type: String,
       required: true,
-      enum: ['Product', 'Combo']
+      enum: ['Product', 'Combo'],
+      default: 'Product'
     },
     name: {
       type: String,
@@ -111,7 +112,7 @@ const orderSchema = new mongoose.Schema({
   },
   orderStatus: {
     type: String,
-    enum: ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Delivered', 'Cancelled', 'CancellationRequested'],
+    enum: ['Pending', 'Confirmed', 'Processing', 'Packed', 'Shipped', 'Delivered', 'Cancelled', 'CancellationRequested'],
     default: 'Pending'
   },
   // Shipping & Tracking Details
@@ -130,6 +131,17 @@ const orderSchema = new mongoose.Schema({
       timestamp: Date,
       remarks: String
     }]
+  },
+  // Dedicated DTDC Logistics metadata
+  dtdc: {
+    consignmentNumber: String,
+    courier: {
+      type: String,
+      default: 'DTDC'
+    },
+    status: String,
+    trackingUrl: String,
+    bookedAt: Date
   },
   deliveredAt: Date,
   cancelledAt: Date,

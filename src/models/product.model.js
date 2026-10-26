@@ -30,6 +30,25 @@ const productSchema = new mongoose.Schema({
     type: String,
     enum: ['5g', '8g', '10g', '20g', '50g', '100g', '120g', '150g', '250g', '300g', '500g', '600g', '800g', '1kg', '1.2kg', '2kg', '5kg', '10kg']
   },
+  isAutoPricing: {
+    type: Boolean,
+    default: false
+  },
+  baseQuantity: {
+    type: Number,
+    min: 1,
+    default: null
+  },
+  baseMrp: {
+    type: Number,
+    min: 0,
+    default: null
+  },
+  baseUnit: {
+    type: String,
+    default: 'Seeds',
+    trim: true
+  },
   // Package variants for seed products with different quantities and prices
   packages: [{
     quantity: {
@@ -41,6 +60,14 @@ const productSchema = new mongoose.Schema({
       type: Number,
       required: true,
       min: 0
+    },
+    originalPrice: {
+      type: Number,
+      min: 0
+    },
+    isCustomPrice: {
+      type: Boolean,
+      default: false
     },
     stock: {
       type: Number,
@@ -119,18 +146,16 @@ const productSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Auto-sync total stock from package variants if present
+const pricingEngine = require('../utils/pricing-engine.util');
+
+// Auto-sync total stock and variant pricing via central pricing engine (FEAT-006)
 productSchema.pre('validate', function (next) {
-  if (this.packages && this.packages.length > 0) {
-    this.stock = this.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
-  }
+  pricingEngine.applyAutoPricing(this);
   next();
 });
 
 productSchema.pre('save', function (next) {
-  if (this.packages && this.packages.length > 0) {
-    this.stock = this.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
-  }
+  pricingEngine.applyAutoPricing(this);
   next();
 });
 
@@ -145,10 +170,13 @@ productSchema.index({ isActive: 1, season: 1, createdAt: -1 });    // seasonal f
 productSchema.index({ isActive: 1, price: 1 });                    // price-low / price-high sorts
 productSchema.index({ isActive: 1, discount: -1 });                 // discounted/deals sort
 productSchema.index({ isActive: 1, rating: -1 });                  // GET /products/featured
-// Search scans name/description/features. Without this the regex $or was a
-// full collection scan on every keystroke-driven search request.
 productSchema.index({ name: 'text', description: 'text', features: 'text' });
 productSchema.index({ isActive: 1, featured: 1, createdAt: -1 });  // homepage "most loved"
 productSchema.index({ isActive: 1, stock: 1 });                    // low-stock admin view
 
+productSchema.statics.applyAutoPricing = pricingEngine.applyAutoPricing;
+productSchema.statics.extractVariantCount = pricingEngine.extractQuantityCount;
+productSchema.statics.pricingEngine = pricingEngine;
+
 module.exports = mongoose.model('Product', productSchema);
+

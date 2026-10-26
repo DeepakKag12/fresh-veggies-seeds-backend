@@ -409,6 +409,30 @@ exports.permanentlyDeleteRecord = async (req, res) => {
       await User.findByIdAndDelete(entityId);
     }
 
+    // Clean up associated images from Cloudinary to prevent orphaned cloud storage bloat
+    const snapshot = record.snapshot || record.entityData || {};
+    try {
+      const cloudinary = require('../config/cloudinary.config');
+      const urls = [
+        ...(Array.isArray(snapshot.images) ? snapshot.images : []),
+        snapshot.image,
+        snapshot.imageUrl,
+        snapshot.desktopImage,
+        snapshot.mobileImage,
+      ].filter(Boolean);
+
+      for (const rawUrl of urls) {
+        if (typeof rawUrl === 'string' && rawUrl.includes('cloudinary.com')) {
+          const match = rawUrl.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[a-zA-Z0-9]+)?$/);
+          if (match && match[1]) {
+            await cloudinary.uploader.destroy(match[1]).catch(() => {});
+          }
+        }
+      }
+    } catch (cleanupErr) {
+      console.warn('⚠️  Cloudinary cleanup skipped:', cleanupErr.message);
+    }
+
     // Record permanent purge in audit trail
     await auditService.logPermanentDeletion({
       req,

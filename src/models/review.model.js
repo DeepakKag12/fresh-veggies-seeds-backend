@@ -38,6 +38,10 @@ const reviewSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  isVerifiedBuyer: {
+    type: Boolean,
+    default: false
+  },
   status: {
     type: String,
     enum: ['pending', 'approved', 'rejected'],
@@ -72,5 +76,11 @@ reviewSchema.index({ userId: 1 });
 // check cannot enforce this on its own: two concurrent submissions both see no
 // existing review and both insert. This index is what actually guarantees it.
 reviewSchema.index({ productId: 1, userId: 1 }, { unique: true });
+
+reviewSchema.pre('save', function (next) {
+  if (this.isVerifiedPurchase) this.isVerifiedBuyer = true;
+  if (this.isVerifiedBuyer) this.isVerifiedPurchase = true;
+  next();
+});
 
 module.exports = mongoose.model('Review', reviewSchema);

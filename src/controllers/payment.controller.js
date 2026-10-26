@@ -100,6 +100,14 @@ exports.createRazorpayOrder = async (req, res) => {
 
     // ── Load dynamic rules ───────────────────────────────────────────────────
     const rules = await getShippingRules();
+
+    if (rules.isStoreClosed) {
+      return res.status(403).json({
+        success: false,
+        message: rules.closureNotice || 'Our storefront is currently closed for routine maintenance. Orders cannot be accepted at this time.'
+      });
+    }
+
     if (rules.minOrderAmount && computedItemsPrice < rules.minOrderAmount) {
       return res.status(400).json({
         success: false,
@@ -167,8 +175,10 @@ exports.createRazorpayOrder = async (req, res) => {
       statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Awaiting online payment' }]
     });
 
-    // ── Save address to user profile for future orders ───────────────────────
-    saveAddressToUser(req.user._id, shippingAddress).catch(() => {});
+    // ── Save address to user profile only if explicitly requested ──────────
+    if (req.body?.saveAddress === true) {
+      saveAddressToUser(req.user._id, shippingAddress).catch(() => {});
+    }
 
     res.status(200).json({
       success: true,
@@ -201,10 +211,13 @@ exports.verifyPayment = async (req, res) => {
   try {
     // Revenue figures on the dashboard change here.
     statsCache.invalidate('admin:');
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, internalOrderId } = req.body;
+    const razorpay_order_id = req.body.razorpay_order_id || req.body.razorpayOrderId || req.body.order_id;
+    const razorpay_payment_id = req.body.razorpay_payment_id || req.body.razorpayPaymentId || req.body.payment_id;
+    const razorpay_signature = req.body.razorpay_signature || req.body.razorpaySignature || req.body.signature;
+    const internalOrderId = req.body.internalOrderId || req.body.orderId;
 
-    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !internalOrderId) {
-      return res.status(400).json({ success: false, message: 'Missing payment verification fields' });
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ success: false, message: 'Missing payment verification fields (razorpay_order_id, razorpay_payment_id, razorpay_signature required)' });
     }
 
     // ── Signature verification (HMAC-SHA256) ─────────────────────────────────
@@ -215,12 +228,16 @@ exports.verifyPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payment signature verification failed' });
     }
 
-    // ── Find the pending internal order (must belong to this user) ────────────
-    const order = await Order.findOne({
-      _id: internalOrderId,
-      userId: req.user._id,
-      'paymentDetails.razorpayOrderId': razorpay_order_id
-    });
+    // ── Find the pending internal order (must belong to this user or admin override) ────────────
+    const orderQuery = internalOrderId
+      ? { _id: internalOrderId, 'paymentDetails.razorpayOrderId': razorpay_order_id }
+      : { 'paymentDetails.razorpayOrderId': razorpay_order_id };
+
+    if (req.user && req.user.role !== 'admin') {
+      orderQuery.userId = req.user._id;
+    }
+
+    let order = await Order.findOne(orderQuery);
 
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found or does not belong to this account' });
@@ -286,16 +303,24 @@ exports.razorpayWebhook = async (req, res) => {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || (process.env.NODE_ENV === 'development' ? 'dev_razorpay_webhook_secret_9988' : null);
 
     // ── Verify webhook signature ──────────────────────────────────────────────
-    // req.body is a raw Buffer from express.raw() — must be used as-is for HMAC
     const receivedSig = req.headers['x-razorpay-signature'];
     if (!receivedSig || !webhookSecret) {
       return res.status(400).json({ success: false, message: 'Missing webhook signature or secret' });
     }
 
-    // Compute HMAC over the RAW buffer (not JSON.stringify — that would corrupt it)
+    // Compute HMAC over the RAW buffer or string
+    let rawPayload;
+    if (Buffer.isBuffer(req.body)) {
+      rawPayload = req.body;
+    } else if (typeof req.body === 'string') {
+      rawPayload = Buffer.from(req.body, 'utf8');
+    } else {
+      rawPayload = Buffer.from(JSON.stringify(req.body), 'utf8');
+    }
+
     const expectedSig = crypto
       .createHmac('sha256', webhookSecret)
-      .update(req.body) // Buffer from express.raw()
+      .update(rawPayload)
       .digest('hex');
 
     // timingSafeEqual throws TypeError if lengths differ — guard against it
@@ -316,7 +341,9 @@ exports.razorpayWebhook = async (req, res) => {
     // Parse the raw body into JSON after signature is verified
     let body;
     try {
-      body = JSON.parse(req.body.toString('utf8'));
+      body = Buffer.isBuffer(req.body)
+        ? JSON.parse(req.body.toString('utf8'))
+        : (typeof req.body === 'string' ? JSON.parse(req.body) : req.body);
     } catch {
       return res.status(400).json({ success: false, message: 'Invalid webhook JSON payload' });
     }

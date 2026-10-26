@@ -1,4 +1,7 @@
 const Contact = require('../models/contact.model');
+const Conversation = require('../models/conversation.model');
+const ChatMessage = require('../models/chat-message.model');
+const { getIO } = require('../socket');
 
 /**
  * @desc    Submit customer contact inquiry
@@ -7,7 +10,7 @@ const Contact = require('../models/contact.model');
  */
 exports.submitContactInquiry = async (req, res) => {
   try {
-    const { name, email, phone, subject, message } = req.body;
+    const { name, email, phone, subject, message, guestId } = req.body;
 
     if (!name || !name.trim() || name.trim().length < 2) {
       return res.status(400).json({
@@ -42,6 +45,7 @@ exports.submitContactInquiry = async (req, res) => {
       }
     }
 
+    // 1. Create persistent Contact ticket
     const inquiry = await Contact.create({
       name: name.trim(),
       email: email.trim().toLowerCase(),
@@ -51,11 +55,77 @@ exports.submitContactInquiry = async (req, res) => {
       ipAddress: req.ip || req.headers['x-forwarded-for'] || ''
     });
 
+    // 2. Direct-to-Chat Bridge: Automatically route message to Live Chat Section (/admin/communication)
+    let conv = null;
+    const userId = req.user?._id;
+    const effectiveGuestId = guestId || req.headers['x-guest-id'] || null;
+
+    if (userId) {
+      conv = await Conversation.findOne({ customerId: userId, status: { $ne: 'archived' } });
+    }
+    if (!conv && cleanPhone) {
+      conv = await Conversation.findOne({ customerPhone: cleanPhone, status: { $ne: 'archived' } });
+    }
+    if (!conv && effectiveGuestId) {
+      conv = await Conversation.findOne({ guestId: effectiveGuestId, status: { $ne: 'archived' } });
+    }
+
+    if (!conv) {
+      conv = await Conversation.create({
+        customerId: userId || null,
+        guestId: effectiveGuestId,
+        customerName: name.trim(),
+        customerEmail: email.trim().toLowerCase(),
+        customerPhone: cleanPhone || '',
+        unreadAdminCount: 0,
+        unreadCustomerCount: 0
+      });
+    } else {
+      if (!conv.customerName || conv.customerName === 'Guest Shopper') conv.customerName = name.trim();
+      if (!conv.customerEmail) conv.customerEmail = email.trim().toLowerCase();
+      if (!conv.customerPhone && cleanPhone) conv.customerPhone = cleanPhone;
+      if (userId && !conv.customerId) conv.customerId = userId;
+    }
+
+    const subjectLabel = subject && subject.trim() ? subject.trim() : 'General Inquiry';
+    const chatText = `[Contact Inquiry: ${subjectLabel}]\n${message.trim()}`;
+
+    const chatMsg = await ChatMessage.create({
+      conversationId: conv._id,
+      sender: 'customer',
+      senderId: userId || null,
+      senderName: name.trim(),
+      text: chatText,
+      status: 'sent'
+    });
+
+    conv.lastMessage = {
+      text: chatText,
+      sender: 'customer',
+      createdAt: chatMsg.createdAt,
+      status: 'sent'
+    };
+    conv.unreadAdminCount = (conv.unreadAdminCount || 0) + 1;
+    await conv.save();
+
+    // 3. Real-time broadcast to Admin Messages & Live Chat Console
+    try {
+      const io = getIO();
+      if (io) {
+        io.to('admin:all').emit('message:received', chatMsg);
+        io.to('admin:all').emit('conversation:updated', { conversation: conv.toObject() });
+        io.to(`conversation:${conv._id}`).emit('message:received', chatMsg);
+      }
+    } catch (socketErr) {
+      // Non-fatal if socket server is unavailable
+    }
+
     return res.status(201).json({
       success: true,
-      message: 'Thank you! Your message has been received. Our gardening support team will contact you shortly.',
+      message: 'Thank you! Your message has been sent directly to our live chat support team.',
       data: {
         id: inquiry._id,
+        conversationId: conv._id,
         createdAt: inquiry.createdAt
       }
     });
@@ -63,7 +133,7 @@ exports.submitContactInquiry = async (req, res) => {
     console.error('Contact inquiry error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Failed to submit your message. Please try again or reach out on WhatsApp.'
+      message: 'Failed to submit your message. Please try again or use our In-App Live Chat.'
     });
   }
 };
@@ -119,18 +189,27 @@ exports.getContactInquiries = async (req, res) => {
  */
 exports.updateInquiryStatus = async (req, res) => {
   try {
-    const { status } = req.body;
-    if (!['new', 'read', 'replied', 'archived'].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid status value.'
-      });
+    const { status, adminNotes } = req.body;
+    const update = {};
+
+    if (status !== undefined) {
+      if (!['new', 'read', 'replied', 'archived', 'pending', 'resolved'].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid status value.'
+        });
+      }
+      update.status = status;
+    }
+
+    if (adminNotes !== undefined) {
+      update.adminNotes = String(adminNotes).trim();
     }
 
     const inquiry = await Contact.findByIdAndUpdate(
       req.params.id,
-      { status },
-      { new: true }
+      update,
+      { new: true, runValidators: true }
     );
 
     if (!inquiry) {

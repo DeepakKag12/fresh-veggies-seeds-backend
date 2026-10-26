@@ -8,6 +8,7 @@ router.post('/create-order', protect, paymentController.createRazorpayOrder);
 
 // Verify Payment (HMAC validated)
 router.post('/verify-payment', protect, paymentController.verifyPayment);
+router.post('/verify', protect, paymentController.verifyPayment);
 
 // Razorpay Webhook — must receive raw body; no JWT needed (verified by HMAC)
 // NOTE: This route is registered with express.raw() in server.js, not json()

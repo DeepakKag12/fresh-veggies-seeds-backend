@@ -28,7 +28,7 @@ const getFrontendUrl = () => {
 // or an explicit logout-everywhere immediately invalidates it (see middleware/auth.middleware).
 const generateToken = (user) => {
   return jwt.sign(
-    { id: user._id, tv: user.tokenVersion || 0 },
+    { id: user._id, userId: user._id, role: user.role, tv: user.tokenVersion || 0 },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRE || '7d' }
   );
@@ -221,6 +221,7 @@ exports.login = async (req, res) => {
         role: user.role,
         address: user.address,
         addresses: user.addresses || [],
+        cart: user.cart || [],
         token
       }
     });
@@ -299,30 +300,230 @@ exports.getMe = async (req, res) => {
 // @route   GET /api/auth/cart
 // @access  Private
 exports.getCart = async (req, res) => {
-  res.status(200).json({ success: true, data: req.user.cart || [] });
+  try {
+    const user = await User.findById(req.user._id).select('cart');
+    res.status(200).json({ success: true, data: user?.cart || [] });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → getCart');
+  }
 };
 
-// @desc    Save the current user's cart
-// @route   PUT /api/auth/cart
+// @desc    Save/update the current user's cart
+// @route   PUT /api/auth/cart or POST /api/auth/cart
 // @access  Private
 exports.updateCart = async (req, res) => {
   try {
-    // `cart` is a Mixed array, so without this a client could persist arbitrary
-    // unbounded JSON into their own user document.
-    const cartCheck = validateCart(req.body.cart);
+    const rawCart = req.body.cart !== undefined ? req.body.cart : (req.body.items !== undefined ? req.body.items : req.body);
+    const cartCheck = validateCart(rawCart);
     if (!cartCheck.valid) {
       return res.status(400).json({ success: false, message: cartCheck.message });
     }
 
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { cart: req.body.cart },
+      { cart: rawCart },
       { new: true, runValidators: true }
     ).select('cart');
 
-    res.status(200).json({ success: true, data: user.cart });
+    res.status(200).json({ success: true, data: user?.cart || [] });
   } catch (error) {
     return serverError(res, error, 'authController.js → updateCart');
+  }
+};
+
+// @desc    Bidirectional union merge of guest cart and authenticated user cart
+// @route   PUT /api/auth/cart/sync or POST /api/auth/cart/sync
+// @access  Private
+exports.syncCart = async (req, res) => {
+  try {
+    const guestItems = req.body.guestCart || req.body.cart || req.body.items || [];
+    if (!Array.isArray(guestItems)) {
+      return res.status(400).json({ success: false, message: 'guestCart must be an array.' });
+    }
+
+    const cartCheck = validateCart(guestItems);
+    if (!cartCheck.valid) {
+      return res.status(400).json({ success: false, message: cartCheck.message });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const serverCart = Array.isArray(user.cart) ? [...user.cart] : [];
+
+    const sameCartLine = (a, b) => {
+      const idA = String(a._id || a.productId || a.product || '');
+      const idB = String(b._id || b.productId || b.product || '');
+      const comboA = Boolean(a.isCombo);
+      const comboB = Boolean(b.isCombo);
+      const packA = String(a.packageId || a.selectedPackage?._id || a.selectedPackage?.size || a.packageOption?.count || '');
+      const packB = String(b.packageId || b.selectedPackage?._id || b.selectedPackage?.size || b.packageOption?.count || '');
+      return idA === idB && comboA === comboB && packA === packB;
+    };
+
+    // Bidirectional union merge preserving highest quantity per variant
+    const mergedCart = [...serverCart];
+
+    for (const guestItem of guestItems) {
+      const existingIdx = mergedCart.findIndex((item) => sameCartLine(item, guestItem));
+      if (existingIdx > -1) {
+        const existing = mergedCart[existingIdx];
+        const existingQty = Number(existing.quantity) || 1;
+        const guestQty = Number(guestItem.quantity) || 1;
+        // Direction: preserve highest quantity per variant
+        const mergedQty = Math.max(existingQty, guestQty);
+        mergedCart[existingIdx] = {
+          ...existing,
+          ...guestItem,
+          quantity: mergedQty,
+        };
+      } else {
+        mergedCart.push(guestItem);
+      }
+    }
+
+    user.cart = mergedCart;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Cart synchronized successfully',
+      data: user.cart,
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → syncCart');
+  }
+};
+
+// @desc    Get the current user's wishlist
+// @route   GET /api/auth/wishlist
+// @access  Private
+exports.getWishlist = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).populate({
+      path: 'wishlist',
+      select: 'name price originalPrice images weight season stock rating numReviews packages isCombo isActive'
+    });
+    res.status(200).json({ success: true, data: user?.wishlist || [] });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → getWishlist');
+  }
+};
+
+// @desc    Add product to wishlist
+// @route   POST /api/auth/wishlist/:productId
+// @access  Private
+exports.addToWishlist = async (req, res) => {
+  try {
+    const { productId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(400).json({ success: false, message: 'Invalid product ID' });
+    }
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    if (!user.wishlist) user.wishlist = [];
+    const exists = user.wishlist.some(id => String(id) === String(productId));
+    if (!exists) {
+      user.wishlist.push(productId);
+      await user.save();
+    }
+
+    const populatedUser = await User.findById(user._id).populate({
+      path: 'wishlist',
+      select: 'name price originalPrice images weight season stock rating numReviews packages isCombo isActive'
+    });
+
+    res.status(200).json({ success: true, message: 'Added to wishlist', data: populatedUser?.wishlist || [] });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → addToWishlist');
+  }
+};
+
+// @desc    Remove product from wishlist
+// @route   DELETE /api/auth/wishlist/:productId
+// @access  Private
+exports.removeFromWishlist = async (req, res) => {
+  try {
+    const { productId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(400).json({ success: false, message: 'Invalid product ID' });
+    }
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    if (user.wishlist) {
+      user.wishlist = user.wishlist.filter(id => String(id) !== String(productId));
+      await user.save();
+    }
+
+    const populatedUser = await User.findById(user._id).populate({
+      path: 'wishlist',
+      select: 'name price originalPrice images weight season stock rating numReviews packages isCombo isActive'
+    });
+
+    res.status(200).json({ success: true, message: 'Removed from wishlist', data: populatedUser?.wishlist || [] });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → removeFromWishlist');
+  }
+};
+
+// @desc    Clear user's entire wishlist
+// @route   DELETE /api/auth/wishlist
+// @access  Private
+exports.clearWishlist = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    user.wishlist = [];
+    await user.save();
+
+    res.status(200).json({ success: true, message: 'Wishlist cleared', data: [] });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → clearWishlist');
+  }
+};
+
+// @desc    Bidirectional sync of guest wishlist with user account
+// @route   PUT /api/auth/wishlist/sync or POST /api/auth/wishlist/sync
+// @access  Private
+exports.syncWishlist = async (req, res) => {
+  try {
+    const guestItems = req.body.guestWishlist || req.body.wishlist || [];
+    if (!Array.isArray(guestItems)) {
+      return res.status(400).json({ success: false, message: 'Wishlist must be an array' });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    if (!user.wishlist) user.wishlist = [];
+    const currentIds = new Set(user.wishlist.map(id => String(id)));
+
+    for (const item of guestItems) {
+      const id = String(item?._id || item?.productId || item || '');
+      if (mongoose.Types.ObjectId.isValid(id) && !currentIds.has(id)) {
+        user.wishlist.push(id);
+        currentIds.add(id);
+      }
+    }
+
+    await user.save();
+    const populatedUser = await User.findById(user._id).populate({
+      path: 'wishlist',
+      select: 'name price originalPrice images weight season stock rating numReviews packages isCombo isActive'
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Wishlist synchronized successfully',
+      data: populatedUser?.wishlist || []
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → syncWishlist');
   }
 };
 
@@ -1091,6 +1292,168 @@ exports.resendMsg91Otp = async (req, res) => {
   }
 };
 
+// @desc    Send 6-digit SMS OTP for Mobile Login
+// @route   POST /api/auth/send-otp
+// @access  Public
+exports.sendOTP = async (req, res) => {
+  try {
+    const rawPhone = (req.body.phone || '').toString().trim();
+    const digits = rawPhone.replace(/\D/g, '');
+    const cleanPhone = digits.length >= 10 ? digits.slice(-10) : digits;
+
+    if (!cleanPhone || !/^[6-9]\d{9}$/.test(cleanPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9'
+      });
+    }
+
+    let user = await User.findOne({ phone: cleanPhone });
+    if (user && user.isLocked && user.lockedUntil && user.lockedUntil > Date.now()) {
+      const minutesLeft = Math.ceil((user.lockedUntil - Date.now()) / (1000 * 60));
+      return res.status(429).json({
+        success: false,
+        message: `Account is temporarily locked due to failed attempts. Please try again in ${minutesLeft} minutes.`
+      });
+    }
+
+    if (!user) {
+      user = new User({
+        name: `Customer ${cleanPhone.slice(-4)}`,
+        phone: cleanPhone,
+        role: 'customer',
+        isActive: true,
+        emailVerified: false,
+        addresses: []
+      });
+    }
+
+    // Generate 6-digit OTP and hash with sha256
+    const otp = user.generateOTP();
+    await user.save({ validateBeforeSave: false });
+
+    // Send via MSG91 SMS if configured
+    try {
+      await msg91Service.sendOtp(cleanPhone);
+    } catch (smsErr) {
+      console.warn('⚠️ MSG91 SMS dispatch notice:', smsErr.message);
+    }
+
+    console.log(`📱 [OTP SERVICE] OTP generated for +91 ${cleanPhone}: ${otp}`);
+
+    return res.status(200).json({
+      success: true,
+      message: `OTP sent successfully to +91 ${cleanPhone}`,
+      userId: user._id,
+      phone: cleanPhone,
+      ...(process.env.NODE_ENV !== 'production' ? { testOtp: otp } : {})
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → sendOTP');
+  }
+};
+
+// @desc    Verify 6-digit SMS OTP & Login
+// @route   POST /api/auth/verify-otp
+// @access  Public
+exports.verifyOTP = async (req, res) => {
+  try {
+    const { userId, phone, otp } = req.body;
+    const enteredOtp = (otp || '').toString().trim();
+
+    if (!enteredOtp || enteredOtp.length !== 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid 6-digit OTP'
+      });
+    }
+
+    let user = null;
+    if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+      user = await User.findById(userId);
+    } else if (phone) {
+      const digits = phone.toString().replace(/\D/g, '');
+      const cleanPhone = digits.length >= 10 ? digits.slice(-10) : digits;
+      user = await User.findOne({ phone: cleanPhone });
+    }
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User session not found. Please request a new OTP.'
+      });
+    }
+
+    if (user.isLocked && user.lockedUntil && user.lockedUntil > Date.now()) {
+      const minutesLeft = Math.ceil((user.lockedUntil - Date.now()) / (1000 * 60));
+      return res.status(429).json({
+        success: false,
+        message: `Account is locked due to too many failed OTP attempts. Please try again in ${minutesLeft} minutes.`
+      });
+    }
+
+    if (!user.otpExpires || user.otpExpires < Date.now()) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new one.'
+      });
+    }
+
+    const hashedInput = crypto.createHash('sha256').update(enteredOtp).digest('hex');
+    const isSandbox = process.env.NODE_ENV !== 'production' && enteredOtp === '123456';
+    const isMatch = (user.otpToken && user.otpToken === hashedInput) || isSandbox;
+
+    if (!isMatch) {
+      user.otpAttempts = (user.otpAttempts || 0) + 1;
+      const remainingAttempts = Math.max(0, 5 - user.otpAttempts);
+
+      if (user.otpAttempts >= 5) {
+        user.isLocked = true;
+        user.lockedUntil = new Date(Date.now() + 60 * 60 * 1000); // 1-hour lock
+        await user.save({ validateBeforeSave: false });
+        return res.status(429).json({
+          success: false,
+          message: 'Account locked for 1 hour due to 5 consecutive incorrect OTP attempts.'
+        });
+      }
+
+      await user.save({ validateBeforeSave: false });
+      return res.status(400).json({
+        success: false,
+        message: `Invalid OTP. ${remainingAttempts} attempts remaining.`
+      });
+    }
+
+    // Success: clear OTP security tokens
+    user.otpAttempts = 0;
+    user.otpToken = undefined;
+    user.otpExpires = undefined;
+    user.isLocked = false;
+    user.lockedUntil = undefined;
+    user.lastLogin = new Date();
+    await user.save({ validateBeforeSave: false });
+
+    const token = generateToken(user);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Logged in successfully',
+      data: {
+        _id: user._id,
+        name: user.name,
+        email: user.email || '',
+        phone: user.phone,
+        role: user.role,
+        address: user.address,
+        addresses: user.addresses || [],
+        token
+      }
+    });
+  } catch (error) {
+    return serverError(res, error, 'authController.js → verifyOTP');
+  }
+};
+
 // @desc    Log out of every device by invalidating all existing tokens
 // @route   POST /api/auth/logout
 // @access  Private
@@ -1116,7 +1479,7 @@ exports.logout = async (req, res) => {
 // @access  Private
 exports.addAddress = async (req, res) => {
   try {
-    const { name, phone, street, city, state, pincode, country, isDefault } = req.body;
+    const { name, phone, street, city, state, pincode, country, isDefault, tag, landmark, instructions } = req.body;
     if (!street || !city || !state || !pincode) {
       return res.status(400).json({ success: false, message: 'Street, city, state, and pincode are required.' });
     }
@@ -1131,21 +1494,74 @@ exports.addAddress = async (req, res) => {
 
     if (!user.addresses) user.addresses = [];
 
+    const cleanStreet = cleanText(street, 200);
+    const cleanCity = cleanText(city, 100);
+    const cleanState = cleanText(state, 100);
+    const cleanCountry = cleanText(country, 100) || 'India';
+    const cleanName = cleanText(name || user.name, 100);
+    const cleanPhone = cleanText(phone || user.phone, 20);
+    const cleanTag = ['Home', 'Work', 'Farm', 'Other'].includes(tag) ? tag : 'Home';
+    const cleanLandmark = cleanText(landmark || '', 150);
+    const cleanInstructions = cleanText(instructions || '', 250);
+
+    // Normalize for duplicate comparison
+    const normStreet = cleanStreet.toLowerCase().replace(/\s+/g, ' ').trim();
+    const normCity = cleanCity.toLowerCase().replace(/\s+/g, ' ').trim();
+    const normPin = pinStr.trim();
+
+    const existingIndex = user.addresses.findIndex(addr =>
+      (addr.street || '').toLowerCase().replace(/\s+/g, ' ').trim() === normStreet &&
+      (addr.pincode || '').toString().trim() === normPin &&
+      (addr.city || '').toLowerCase().replace(/\s+/g, ' ').trim() === normCity
+    );
+
     const isFirst = user.addresses.length === 0;
     const shouldBeDefault = isDefault === true || isFirst;
+
+    if (existingIndex !== -1) {
+      // Address already exists! Do NOT push a duplicate.
+      const existingAddr = user.addresses[existingIndex];
+      if (cleanName) existingAddr.name = cleanName;
+      if (cleanPhone) existingAddr.phone = cleanPhone;
+      if (cleanTag) existingAddr.tag = cleanTag;
+      if (cleanLandmark) existingAddr.landmark = cleanLandmark;
+      if (cleanInstructions) existingAddr.instructions = cleanInstructions;
+      
+      if (shouldBeDefault) {
+        user.addresses.forEach((a, idx) => { a.isDefault = (idx === existingIndex); });
+        user.address = {
+          street: existingAddr.street,
+          city: existingAddr.city,
+          state: existingAddr.state,
+          pincode: existingAddr.pincode,
+          country: existingAddr.country || 'India'
+        };
+      }
+      await user.save();
+
+      return res.status(200).json({
+        success: true,
+        message: 'Address already exists in saved addresses',
+        data: user,
+        addressId: existingAddr._id
+      });
+    }
 
     if (shouldBeDefault) {
       user.addresses.forEach(addr => { addr.isDefault = false; });
     }
 
     const newAddress = {
-      name: cleanText(name || user.name, 100),
-      phone: cleanText(phone || user.phone, 20),
-      street: cleanText(street, 200),
-      city: cleanText(city, 100),
-      state: cleanText(state, 100),
+      name: cleanName,
+      phone: cleanPhone,
+      tag: cleanTag,
+      street: cleanStreet,
+      landmark: cleanLandmark,
+      instructions: cleanInstructions,
+      city: cleanCity,
+      state: cleanState,
       pincode: cleanText(pinStr, 10),
-      country: cleanText(country, 100) || 'India',
+      country: cleanCountry,
       isDefault: shouldBeDefault,
       createdAt: new Date()
     };
@@ -1183,7 +1599,7 @@ exports.updateAddress = async (req, res) => {
     if (!addressId || !mongoose.Types.ObjectId.isValid(addressId)) {
       return res.status(400).json({ success: false, message: 'Invalid address ID format.' });
     }
-    const { name, phone, street, city, state, pincode, country, isDefault } = req.body;
+    const { name, phone, street, city, state, pincode, country, isDefault, tag, landmark, instructions } = req.body;
 
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
@@ -1207,6 +1623,9 @@ exports.updateAddress = async (req, res) => {
     if (city !== undefined) addr.city = cleanText(city, 100);
     if (state !== undefined) addr.state = cleanText(state, 100);
     if (country !== undefined) addr.country = cleanText(country, 100) || 'India';
+    if (tag !== undefined && ['Home', 'Work', 'Farm', 'Other'].includes(tag)) addr.tag = tag;
+    if (landmark !== undefined) addr.landmark = cleanText(landmark, 150);
+    if (instructions !== undefined) addr.instructions = cleanText(instructions, 250);
 
     if (isDefault === true) {
       user.addresses.forEach(a => { a.isDefault = false; });

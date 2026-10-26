@@ -3,58 +3,110 @@ const auditService = require('../services/audit.service');
 const cacheService = require('../utils/cache.util');
 const { serverError } = require('../utils/respond.util');
 
+// Slugify helper
+const slugify = (text) => {
+  if (!text) return '';
+  return text
+    .toString()
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-');
+};
+
+// Collision detection: e.g. leafy-greens -> leafy-greens-1 -> leafy-greens-2
+const generateUniqueSlug = async (name, excludeId = null, customSlug = '') => {
+  const base = (customSlug || name || '')
+    .toString()
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-');
+
+  const baseSlug = base || `category-${Date.now()}`;
+  let candidateSlug = baseSlug;
+  let counter = 1;
+
+  while (true) {
+    const query = {
+      slug: candidateSlug,
+      isDeleted: { $ne: true }
+    };
+    if (excludeId) {
+      query._id = { $ne: excludeId };
+    }
+    const match = await Category.findOne(query);
+    if (!match) {
+      return candidateSlug;
+    }
+    candidateSlug = `${baseSlug}-${counter}`;
+    counter++;
+  }
+};
+
 // @desc    Get all categories
 // @route   GET /api/categories
 // @access  Public
 exports.getCategories = async (req, res) => {
   try {
     const includeAll = req.query.all === 'true';
-    const cacheKey = includeAll ? null : 'categories:all';
-    if (cacheKey) {
-      const cached = cacheService.get(cacheKey);
-      if (cached) {
-        return res.status(200).json(cached);
-      }
-    }
+    const cacheKey = includeAll ? 'categories:admin:all' : 'categories:all';
 
-    const filter = includeAll
-      ? { isDeleted: { $ne: true } }
-      : { isActive: true, isDeleted: { $ne: true } };
-    const categories = await Category.find(filter)
-      .populate('parentCategory', 'name slug')
-      .sort({ name: 1 }) // Sort alphabetically by name
-      .lean();
+    return await cacheService.sendCachedResponse(req, res, cacheKey, async () => {
+      const filter = includeAll
+        ? { isDeleted: { $ne: true } }
+        : { isActive: true, isDeleted: { $ne: true } };
+      const categories = await Category.find(filter)
+        .populate('parentCategory', 'name slug')
+        .sort({ order: 1, name: 1 })
+        .lean();
 
-    // Define desired order
-    const order = ['Vegetable Seeds', 'Flower Seeds', 'Grow Bags', 'Soil & Fertilizers', 'Tools', 'Herbs'];
+      // Aggregate product counts per category
+      const Product = require('../models/product.model');
+      const counts = await Product.aggregate([
+        { $match: { isDeleted: { $ne: true } } },
+        { $group: { _id: '$categoryId', count: { $sum: 1 } } }
+      ]);
+      const countMap = {};
+      counts.forEach(c => {
+        if (c._id) {
+          countMap[c._id.toString()] = c.count;
+        }
+      });
 
-    // Sort categories based on the defined order
-    const sortedCategories = categories.sort((a, b) => {
-      const indexA = order.indexOf(a.name);
-      const indexB = order.indexOf(b.name);
+      const categoriesWithCount = categories.map((cat, idx) => ({
+        ...cat,
+        order: typeof cat.order === 'number' && cat.order !== 0 ? cat.order : (idx + 1),
+        productCount: countMap[cat._id.toString()] || 0
+      }));
 
-      // If both are in the order array, sort by their index
-      if (indexA !== -1 && indexB !== -1) {
-        return indexA - indexB;
-      }
-      // If only a is in the array, it comes first
-      if (indexA !== -1) return -1;
-      // If only b is in the array, it comes first
-      if (indexB !== -1) return 1;
-      // If neither is in the array, maintain original order
-      return 0;
-    });
+      // Sort categories: respect order field if set, fallback to default order list, then alphabetical
+      const defaultOrder = ['Vegetable Seeds', 'Flower Seeds', 'Grow Bags', 'Soil & Fertilizers', 'Tools', 'Herbs'];
+      const sortedCategories = categoriesWithCount.sort((a, b) => {
+        const orderA = typeof a.order === 'number' && a.order !== 0 ? a.order : null;
+        const orderB = typeof b.order === 'number' && b.order !== 0 ? b.order : null;
+        if (orderA !== null && orderB !== null && orderA !== orderB) {
+          return orderA - orderB;
+        }
+        if (orderA !== null && orderB === null) return -1;
+        if (orderB !== null && orderA === null) return 1;
 
-    const payload = {
-      success: true,
-      count: sortedCategories.length,
-      data: sortedCategories
-    };
+        const indexA = defaultOrder.indexOf(a.name);
+        const indexB = defaultOrder.indexOf(b.name);
+        if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+        if (indexA !== -1) return -1;
+        if (indexB !== -1) return 1;
+        return a.name.localeCompare(b.name);
+      });
 
-    // Cache categories in memory for 5 minutes (auto-invalidated on admin mutations)
-    cacheService.set('categories:all', payload, 5 * 60 * 1000);
-
-    res.status(200).json(payload);
+      return {
+        success: true,
+        count: sortedCategories.length,
+        data: sortedCategories
+      };
+    }, cacheService.TTL_TIERS?.STORE_CATALOG || 60_000);
   } catch (error) {
     return serverError(res, error, 'categoryController.js → getCategories');
   }
@@ -76,9 +128,18 @@ exports.getCategory = async (req, res) => {
       });
     }
 
+    const Product = require('../models/product.model');
+    const productCount = await Product.countDocuments({
+      categoryId: category._id,
+      isDeleted: { $ne: true }
+    });
+
     res.status(200).json({
       success: true,
-      data: category
+      data: {
+        ...category,
+        productCount
+      }
     });
   } catch (error) {
     return serverError(res, error, 'categoryController.js → getCategory');
@@ -90,7 +151,69 @@ exports.getCategory = async (req, res) => {
 // @access  Private/Admin
 exports.createCategory = async (req, res) => {
   try {
-    const category = await Category.create(req.body);
+    const rawName = (req.body.name || '').trim();
+    if (!rawName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Category name is required'
+      });
+    }
+
+    // Check for existing active category with identical name
+    const escapedName = rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existingActive = await Category.findOne({
+      name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
+      isDeleted: { $ne: true }
+    });
+
+    if (existingActive) {
+      return res.status(400).json({
+        success: false,
+        message: `A category named "${rawName}" already exists.`
+      });
+    }
+
+    // Generate unique slug with collision detection (leafy-greens-1, etc.)
+    const uniqueSlug = await generateUniqueSlug(rawName, null, req.body.slug);
+
+    // Check if category previously existed and was soft-deleted — reactivate it cleanly
+    const softDeleted = await Category.findOne({
+      $or: [
+        { name: { $regex: new RegExp(`^${escapedName}$`, 'i') } },
+        { slug: uniqueSlug }
+      ],
+      isDeleted: true
+    });
+
+    let category;
+    if (softDeleted) {
+      softDeleted.name = rawName;
+      softDeleted.slug = uniqueSlug;
+      softDeleted.description = req.body.description !== undefined ? req.body.description : softDeleted.description;
+      softDeleted.icon = req.body.icon !== undefined ? req.body.icon : softDeleted.icon;
+      softDeleted.image = req.body.image !== undefined ? req.body.image : softDeleted.image;
+      softDeleted.order = req.body.order !== undefined ? req.body.order : softDeleted.order;
+      softDeleted.isActive = req.body.isActive !== undefined ? req.body.isActive : true;
+      softDeleted.showInCircle = req.body.showInCircle !== false;
+      softDeleted.isDeleted = false;
+      softDeleted.deletedAt = null;
+      softDeleted.deletedBy = null;
+      softDeleted.deletionReason = '';
+      category = await softDeleted.save();
+    } else {
+      let nextOrder = req.body.order;
+      if (nextOrder === undefined || nextOrder === null) {
+        const lastCat = await Category.findOne({ isDeleted: { $ne: true } }).sort({ order: -1 }).select('order');
+        nextOrder = (lastCat?.order || 0) + 1;
+      }
+
+      category = await Category.create({
+        ...req.body,
+        name: rawName,
+        slug: uniqueSlug,
+        order: nextOrder
+      });
+    }
 
     cacheService.invalidate('categories:');
     cacheService.invalidate('products:');
@@ -102,7 +225,7 @@ exports.createCategory = async (req, res) => {
       entityType: 'Category',
       entityId: category._id,
       entityName: category.name,
-      details: { name: category.name, slug: category.slug },
+      details: { name: category.name, slug: category.slug, order: category.order },
       ipAddress: req.ip
     });
 
@@ -111,6 +234,19 @@ exports.createCategory = async (req, res) => {
       data: category
     });
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'A category with this name or slug already exists.'
+      });
+    }
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(val => val.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(', ')
+      });
+    }
     return serverError(res, error, 'categoryController.js → createCategory');
   }
 };
@@ -120,9 +256,34 @@ exports.createCategory = async (req, res) => {
 // @access  Private/Admin
 exports.updateCategory = async (req, res) => {
   try {
-    // Sync slug with updated name if slug is not explicitly provided
-    if (req.body.name && !req.body.slug) {
-      req.body.slug = req.body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    const rawName = req.body.name ? req.body.name.trim() : undefined;
+    if (req.body.name !== undefined && !rawName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Category name cannot be empty'
+      });
+    }
+
+    // Check for duplicate name in other categories
+    if (rawName) {
+      const escapedName = rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const duplicate = await Category.findOne({
+        _id: { $ne: req.params.id },
+        name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
+        isDeleted: { $ne: true }
+      });
+      if (duplicate) {
+        return res.status(400).json({
+          success: false,
+          message: `Another category named "${rawName}" already exists.`
+        });
+      }
+    }
+
+    if (req.body.slug !== undefined || rawName) {
+      const existingDoc = await Category.findById(req.params.id);
+      const targetName = rawName || existingDoc?.name || '';
+      req.body.slug = await generateUniqueSlug(targetName, req.params.id, req.body.slug);
     }
 
     const category = await Category.findOneAndUpdate(
@@ -157,7 +318,71 @@ exports.updateCategory = async (req, res) => {
       data: category
     });
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'A category with this name or slug already exists.'
+      });
+    }
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(val => val.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(', ')
+      });
+    }
     return serverError(res, error, 'categoryController.js → updateCategory');
+  }
+};
+
+// @desc    Reorder category hierarchy
+// @route   PUT /api/categories/reorder
+// @access  Private/Admin
+exports.reorderCategories = async (req, res) => {
+  try {
+    const { categoryIds, items } = req.body;
+
+    if (Array.isArray(categoryIds) && categoryIds.length > 0) {
+      const bulkOps = categoryIds.map((id, index) => ({
+        updateOne: {
+          filter: { _id: id },
+          update: { $set: { order: index + 1 } }
+        }
+      }));
+      await Category.bulkWrite(bulkOps);
+    } else if (Array.isArray(items) && items.length > 0) {
+      const bulkOps = items.map((item, index) => ({
+        updateOne: {
+          filter: { _id: item.id || item._id },
+          update: { $set: { order: typeof item.order === 'number' ? item.order : index + 1 } }
+        }
+      }));
+      await Category.bulkWrite(bulkOps);
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'categoryIds array or items array is required for reordering'
+      });
+    }
+
+    cacheService.invalidate('categories:');
+    cacheService.invalidate('products:');
+
+    // Audit log
+    await auditService.logAction({
+      actor: req.user,
+      action: 'UPDATE',
+      entityType: 'Category',
+      details: { action: 'REORDER_CATEGORIES' },
+      ipAddress: req.ip
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Category hierarchy reordered successfully'
+    });
+  } catch (error) {
+    return serverError(res, error, 'categoryController.js → reorderCategories');
   }
 };
 
@@ -174,7 +399,7 @@ exports.deleteCategory = async (req, res) => {
     if (associatedProducts > 0) {
       return res.status(400).json({
         success: false,
-        message: `Cannot delete category: ${associatedProducts} active product(s) are still assigned to it. Please reassign or delete them first.`
+        message: `Cannot delete category with ${associatedProducts} assigned products. Reassign products first.`
       });
     }
 
@@ -216,3 +441,4 @@ exports.deleteCategory = async (req, res) => {
     return serverError(res, error, 'categoryController.js → deleteCategory');
   }
 };
+

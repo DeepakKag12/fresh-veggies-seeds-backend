@@ -41,7 +41,10 @@ const userSchema = new mongoose.Schema({
   addresses: [{
     name: { type: String, trim: true },
     phone: { type: String, trim: true },
+    tag: { type: String, enum: ['Home', 'Work', 'Farm', 'Other'], default: 'Home', trim: true },
     street: { type: String, trim: true },
+    landmark: { type: String, trim: true, default: '' },
+    instructions: { type: String, trim: true, default: '' },
     city: { type: String, trim: true },
     state: { type: String, trim: true },
     pincode: { type: String, trim: true },
@@ -53,6 +56,10 @@ const userSchema = new mongoose.Schema({
     type: [mongoose.Schema.Types.Mixed],
     default: []
   },
+  wishlist: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product'
+  }],
   role: {
     type: String,
     enum: ['customer', 'admin'],
@@ -123,6 +130,43 @@ userSchema.pre('save', async function(next) {
   // path can forget to revoke old sessions.
   if (!this.isNew) {
     this.tokenVersion = (this.tokenVersion || 0) + 1;
+  }
+  next();
+});
+
+// Enforce single default address and sync user.address
+userSchema.pre('save', function(next) {
+  if (this.isModified('addresses')) {
+    if (this.addresses && this.addresses.length > 0) {
+      const defaultAddrs = this.addresses.filter(a => a.isDefault);
+      if (defaultAddrs.length === 0) {
+        // Automatically reassign default to first address if none is default
+        this.addresses[0].isDefault = true;
+      } else if (defaultAddrs.length > 1) {
+        // Preserve only the most recent address marked default
+        let foundFirst = false;
+        for (let i = this.addresses.length - 1; i >= 0; i--) {
+          if (this.addresses[i].isDefault) {
+            if (!foundFirst) {
+              foundFirst = true;
+            } else {
+              this.addresses[i].isDefault = false;
+            }
+          }
+        }
+      }
+
+      const activeDefault = this.addresses.find(a => a.isDefault) || this.addresses[0];
+      this.address = {
+        street: activeDefault.street || '',
+        city: activeDefault.city || '',
+        state: activeDefault.state || '',
+        pincode: activeDefault.pincode || '',
+        country: activeDefault.country || 'India'
+      };
+    } else {
+      this.address = { street: '', city: '', state: '', pincode: '', country: 'India' };
+    }
   }
   next();
 });

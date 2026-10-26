@@ -87,15 +87,30 @@ async function buildVerifiedItems(orderItems) {
       dbImage = product.images?.[0] || '';
 
     } else if (item.productType === 'Combo') {
-      const combo = await Combo.findById(item.product).select('price name images isActive stock');
+      const combo = await Combo.findById(item.product)
+        .populate('includedProducts.productId', 'name stock isActive isDeleted')
+        .select('price name images isActive isDeleted stock includedProducts');
 
-      if (!combo || !combo.isActive) {
+      if (!combo || !combo.isActive || combo.isDeleted) {
         throw new Error('One of the combos in your cart is no longer available');
       }
 
-      // Gap #2: combo stock was never validated on either order path.
       if (typeof combo.stock === 'number' && combo.stock < quantity) {
         throw new Error(`Only ${combo.stock} left of "${combo.name}"`);
+      }
+
+      // FEAT-007 Bundle Stock Dependency Tracking: Ensure each child product is in stock
+      if (Array.isArray(combo.includedProducts)) {
+        for (const inc of combo.includedProducts) {
+          const child = inc.productId;
+          const needed = (inc.quantity || 1) * quantity;
+          if (!child || child.isDeleted || !child.isActive) {
+            throw new Error(`"${combo.name}" is temporarily unavailable because one of its items is discontinued.`);
+          }
+          if (typeof child.stock === 'number' && child.stock < needed) {
+            throw new Error(`"${combo.name}" is temporarily unavailable (${child.name} is out of stock).`);
+          }
+        }
       }
 
       dbPrice = combo.price;

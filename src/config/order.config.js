@@ -53,6 +53,8 @@ const getShippingRules = async () => {
       onlineDiscountType: settings.payments?.onlineDiscountType || 'percentage',
       onlineDiscountValue: settings.payments?.onlineDiscountValue ?? 0,
       onlineDiscountMaxLimit: settings.payments?.onlineDiscountMaxLimit ?? 100,
+      isStoreClosed: Boolean(settings.maintenance?.isStoreClosed),
+      closureNotice: settings.maintenance?.closureNotice || 'Our storefront is currently closed for maintenance. Please try again later.',
     };
   } catch {
     return {
@@ -66,6 +68,8 @@ const getShippingRules = async () => {
       onlineDiscountType: 'percentage',
       onlineDiscountValue: 0,
       onlineDiscountMaxLimit: 100,
+      isStoreClosed: false,
+      closureNotice: 'Our storefront is currently closed for maintenance.',
     };
   }
 };
@@ -73,6 +77,7 @@ const getShippingRules = async () => {
 const ALL_ORDER_STATUSES = [
   'Pending',
   'Confirmed',
+  'Processing',
   'Packed',
   'Shipped',
   'Delivered',
@@ -80,29 +85,35 @@ const ALL_ORDER_STATUSES = [
   'CancellationRequested',
 ];
 
-// Standard workflow suggestions for UI shortcuts
+// Finite-state order lifecycle workflow (Shiprocket / Shopify Orders Benchmark):
+// Pending -> Confirmed -> Processing/Packed -> Shipped -> Delivered / Cancelled
 const ALLOWED_TRANSITIONS = {
-  Pending:               ['Confirmed', 'Packed', 'Shipped', 'Delivered', 'Cancelled'],
-  Confirmed:             ['Pending', 'Packed', 'Shipped', 'Delivered', 'Cancelled'],
-  Packed:                ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled'],
-  Shipped:               ['Pending', 'Confirmed', 'Packed', 'Delivered', 'Cancelled'],
-  Delivered:             ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Cancelled'],
-  Cancelled:             ['Pending', 'Confirmed', 'Packed', 'Shipped', 'Delivered'],
-  CancellationRequested: ['Cancelled', 'Confirmed', 'Packed', 'Shipped'],
+  Pending:               ['Confirmed', 'Processing', 'Packed', 'Cancelled'],
+  Confirmed:             ['Processing', 'Packed', 'Shipped', 'Cancelled'],
+  Processing:            ['Packed', 'Shipped', 'Cancelled'],
+  Packed:                ['Processing', 'Shipped', 'Cancelled'],
+  Shipped:               ['Delivered', 'Cancelled'],
+  Delivered:             [], // Terminal! Backward transition is strictly prohibited
+  Cancelled:             [], // Terminal! Backward transition is strictly prohibited
+  CancellationRequested: ['Cancelled', 'Confirmed', 'Processing', 'Packed', 'Shipped'],
 };
 
 /** Statuses from which a shipment may be booked. */
-const SHIPPABLE_STATUSES = ['Confirmed', 'Packed'];
+const SHIPPABLE_STATUSES = ['Confirmed', 'Processing', 'Packed'];
 
 /** Statuses that mean the order is over and stock/coupons should be released. */
 const TERMINAL_STATUSES = ['Delivered', 'Cancelled'];
 
 /** Statuses at which stock has been committed to the customer. */
-const STOCK_COMMITTED_STATUSES = ['Confirmed', 'Packed', 'Shipped', 'Delivered'];
+const STOCK_COMMITTED_STATUSES = ['Confirmed', 'Processing', 'Packed', 'Shipped', 'Delivered'];
 
-const canTransition = (from, to, isAdmin = true) => {
-  if (isAdmin) return ALL_ORDER_STATUSES.includes(to);
-  return (ALLOWED_TRANSITIONS[from] || []).includes(to);
+const canTransition = (from, to) => {
+  if (from === to) return true;
+  if (!ALL_ORDER_STATUSES.includes(to)) return false;
+  // Terminal states cannot move backwards
+  if (from === 'Delivered' || from === 'Cancelled') return false;
+  const validTargets = ALLOWED_TRANSITIONS[from] || [];
+  return validTargets.includes(to);
 };
 
 module.exports = {

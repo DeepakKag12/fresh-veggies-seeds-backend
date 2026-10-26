@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 const Order = require('../models/order.model');
 const User = require('../models/user.model');
+const Product = require('../models/product.model');
+const Combo = require('../models/combo.model');
 const dtdcService = require('../services/dtdc.service');
 const razorpayService = require('../services/razorpay.service');
 const stockService = require('../services/stock.service');
@@ -9,6 +11,7 @@ const couponService = require('../services/coupon.service');
 const { buildVerifiedItems } = require('../services/pricing.service');
 const notify        = require('../services/order-notification.service');
 const statsCache = require('../utils/stats-cache.util');
+const cacheService = require('../utils/cache.util');
 const { serverError } = require('../utils/respond.util');
 
 // Pricing rules and the status state machine are shared with paymentController
@@ -16,8 +19,10 @@ const { serverError } = require('../utils/respond.util');
 const {
   computeShippingPrice,
   getShippingRules,
+  ALL_ORDER_STATUSES,
   ALLOWED_TRANSITIONS,
   SHIPPABLE_STATUSES,
+  canTransition,
 } = require('../config/order.config');
 const Settings = require('../models/settings.model');
 
@@ -90,7 +95,9 @@ exports.createOrder = async (req, res) => {
   try {
     // NOTE: couponCode, never a discount amount. The discount is computed
     // server-side from the code — see couponService.
-    const { orderItems, shippingAddress, paymentMode, couponCode = null } = req.body;
+    const rawMode = String(req.body.paymentMode || req.body.paymentMethod || 'COD').trim().toUpperCase();
+    const paymentMode = rawMode === 'ONLINE' ? 'Online' : rawMode === 'UPI' ? 'UPI' : 'COD';
+    const { orderItems, shippingAddress, couponCode = null } = req.body;
 
     if (!orderItems || orderItems.length === 0) {
       return res.status(400).json({ success: false, message: 'No order items provided' });
@@ -124,6 +131,13 @@ exports.createOrder = async (req, res) => {
     // ── Load dynamic store rules ─────────────────────────────────────────────
     const rules = await getShippingRules();
 
+    if (rules.isStoreClosed) {
+      return res.status(403).json({
+        success: false,
+        message: rules.closureNotice || 'Our storefront is currently closed for routine maintenance. Orders cannot be accepted at this time.'
+      });
+    }
+
     // Minimum basket requirement
     if (rules.minOrderAmount && computedItemsPrice < rules.minOrderAmount) {
       return res.status(400).json({
@@ -137,6 +151,15 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Cash on Delivery is currently disabled. Please choose Online Payment.'
+      });
+    }
+
+    // COD minimum basket requirement
+    const codMin = rules.codMinOrder || rules.minOrderAmount;
+    if ((paymentMode === 'COD' || !paymentMode) && codMin && computedItemsPrice < codMin) {
+      return res.status(400).json({
+        success: false,
+        message: `Minimum order amount for Cash on Delivery is ₹${codMin}. Current items total is ₹${computedItemsPrice}.`
       });
     }
 
@@ -217,8 +240,10 @@ exports.createOrder = async (req, res) => {
       throw createErr;
     }
 
-    // ── Save address to user profile for future orders ───────────────────────
-    saveAddressToUser(req.user._id, shippingAddress).catch(() => {});
+    // ── Save address to user profile only if explicitly requested ──────────
+    if (req.body?.saveAddress === true) {
+      saveAddressToUser(req.user._id, shippingAddress).catch(() => {});
+    }
 
     // ── Notify (fire-and-forget: a mail outage must not fail a placed order) ──
     notify.sendOrderConfirmation(order, req.user).catch((e) =>
@@ -419,24 +444,28 @@ exports.getAllOrders = async (req, res) => {
 // @desc    Update order status (Admin) — allows admin to change status from anywhere
 // @route   PUT /api/orders/:id/status
 // @access  Private/Admin
+// @desc    Update order status (Admin) — finite-state order lifecycle workflow
+// @route   PUT /api/orders/:id/status
+// @access  Private/Admin
 exports.updateOrderStatus = async (req, res) => {
   try {
-    const { orderStatus, note, shipping } = req.body;
+    const { note, shipping } = req.body;
+    const rawStatus = req.body.orderStatus || req.body.status;
 
-    const VALID_STATUSES = [
-      'Pending',
-      'Confirmed',
-      'Packed',
-      'Shipped',
-      'Delivered',
-      'Cancelled',
-      'CancellationRequested'
-    ];
-
-    if (!orderStatus || !VALID_STATUSES.includes(orderStatus)) {
+    if (!rawStatus) {
       return res.status(400).json({
         success: false,
-        message: `Invalid order status "${orderStatus}". Must be one of: ${VALID_STATUSES.join(', ')}`
+        message: 'Order status is required'
+      });
+    }
+
+    // Match status case-insensitively against whitelist
+    const orderStatus = ALL_ORDER_STATUSES.find(s => s.toLowerCase() === String(rawStatus).trim().toLowerCase());
+
+    if (!orderStatus) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid order status "${rawStatus}". Must be one of: ${ALL_ORDER_STATUSES.join(', ')}`
       });
     }
 
@@ -444,7 +473,16 @@ exports.updateOrderStatus = async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     const previousStatus = order.orderStatus;
-    if (previousStatus === orderStatus && !shipping) {
+
+    // Validate finite-state progression (e.g. Delivered cannot move back to Pending)
+    if (!canTransition(previousStatus, orderStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status transition: cannot transition order from "${previousStatus}" to "${orderStatus}"`
+      });
+    }
+
+    if (previousStatus === orderStatus && !shipping && !req.body.trackingNumber && !req.body.awbNumber) {
       return res.status(200).json({
         success: true,
         data: order,
@@ -455,20 +493,41 @@ exports.updateOrderStatus = async (req, res) => {
     order.orderStatus = orderStatus;
 
     // Save dispatch / tracking info if provided (e.g. Courier partner, AWB number)
-    if (shipping && typeof shipping === 'object') {
+    const courierPartner = shipping?.courierName || shipping?.courier || req.body.courier || req.body.courierName;
+    const trackingNo = shipping?.awbNumber || shipping?.trackingNumber || req.body.trackingNumber || req.body.awbNumber;
+    let trackUrl = shipping?.trackingUrl || req.body.trackingUrl;
+
+    if (trackingNo && !trackUrl && (courierPartner || 'DTDC').toUpperCase().includes('DTDC')) {
+      trackUrl = `https://www.dtdc.in/tracking.asp?strCnno=${trackingNo}`;
+    }
+
+    let hasNewTracking = false;
+    if (courierPartner || trackingNo || trackUrl) {
       if (!order.shipping) order.shipping = {};
-      if (shipping.courierName) order.shipping.courierName = shipping.courierName;
-      if (shipping.awbNumber) order.shipping.awbNumber = shipping.awbNumber;
-      if (shipping.trackingUrl) order.shipping.trackingUrl = shipping.trackingUrl;
+      if (courierPartner) order.shipping.courierName = courierPartner;
+      if (trackingNo) {
+        order.shipping.awbNumber = trackingNo;
+        hasNewTracking = true;
+      }
+      if (trackUrl) order.shipping.trackingUrl = trackUrl;
       if (orderStatus === 'Shipped' && !order.shipping.shippedAt) {
         order.shipping.shippedAt = new Date();
       }
+
+      // Synchronize dedicated dtdc metadata object
+      order.dtdc = {
+        consignmentNumber: trackingNo || order.shipping.awbNumber,
+        courier: courierPartner || order.shipping.courierName || 'DTDC',
+        status: orderStatus === 'Shipped' ? 'In Transit' : 'Booked',
+        trackingUrl: trackUrl || order.shipping.trackingUrl,
+        bookedAt: order.dtdc?.bookedAt || new Date()
+      };
     }
 
     // Append-only audit trail — who moved this order, when, from what, and why.
     const auditNote = note || (
-      shipping?.awbNumber
-        ? `Marked as ${orderStatus} via ${shipping.courierName || 'Courier'} (AWB: ${shipping.awbNumber})`
+      trackingNo
+        ? `Marked as ${orderStatus} via ${courierPartner || 'DTDC'} (AWB: ${trackingNo})`
         : `Status updated from ${previousStatus} to ${orderStatus} by admin`
     );
 
@@ -495,7 +554,6 @@ exports.updateOrderStatus = async (req, res) => {
     } else if (previousStatus === 'Cancelled') {
       // Admin revived a previously cancelled order
       order.cancelledAt = undefined;
-      // If stock had been restored when it was cancelled, reset flags so stock can re-commit
       if (order.stockRestored) {
         order.stockRestored = false;
         order.stockDecremented = false;
@@ -509,14 +567,11 @@ exports.updateOrderStatus = async (req, res) => {
       order.cancellationRequest.rejectionReason = note || `Status updated to ${orderStatus} by admin`;
     }
 
-    // statsCache.invalidate('admin:'); // moved
-
     await order.save();
     statsCache.invalidate('admin:');
 
     // ── Inventory Side Effects ───────────────────────────────────────────────
-    // If moving to any status where stock should be committed (and not already committed):
-    if (['Confirmed', 'Packed', 'Shipped', 'Delivered'].includes(orderStatus)) {
+    if (['Confirmed', 'Processing', 'Packed', 'Shipped', 'Delivered'].includes(orderStatus)) {
       stockService.decrementStockAfterConfirm(order).catch((err) =>
         console.error('⚠️  Stock decrement error:', err.message)
       );
@@ -535,8 +590,9 @@ exports.updateOrderStatus = async (req, res) => {
     }
 
     // ── Notify Customer ───────────────────────────────────────────────────────
+    // If tracking number was added or status updated, trigger customer notification
     const customer = await User.findById(order.userId).select('name email phone');
-    notify.sendStatusUpdate(order, customer, orderStatus).catch((err) =>
+    notify.sendStatusUpdate(order, customer, hasNewTracking && orderStatus !== 'Delivered' ? 'Shipped' : orderStatus).catch((err) =>
       console.error('⚠️  Status update notification failed:', err.message)
     );
 
@@ -550,8 +606,8 @@ exports.updateOrderStatus = async (req, res) => {
   }
 };
 
-// @desc    Request order cancellation (user)
-// @route   PUT /api/orders/:id/cancel
+// @desc    Customer self-service order cancellation (Domino's / Amazon Benchmark)
+// @route   POST /api/orders/:id/cancel or PUT /api/orders/:id/cancel
 // @access  Private
 exports.cancelOrder = async (req, res) => {
   try {
@@ -561,74 +617,70 @@ exports.cancelOrder = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
-    if (order.userId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ success: false, message: 'Not authorized' });
+    if (order.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized to cancel this order' });
     }
 
-    // ── Check store cancellation settings ────────────────────────────────────
-    const settings = await Settings.getSingleton().catch(() => null);
-    if (settings && !settings.orders.allowCustomerCancellation) {
+    // ── Enforce cancellation policy: allowed only when order status is pending or confirmed ──
+    const currentStatus = (order.orderStatus || '').toLowerCase();
+    if (!['pending', 'confirmed'].includes(currentStatus)) {
       return res.status(400).json({
         success: false,
-        message: 'Online cancellation requests are currently disabled. Please contact customer support.'
+        message: `Order cannot be cancelled once ${order.orderStatus.toLowerCase()}. Please contact customer support.`
       });
     }
 
-    const cutoff = settings?.orders?.cancellationAllowedUntil || 'Before Shipped';
-    if (cutoff === 'Before Packed' && ['Packed', 'Shipped', 'Delivered'].includes(order.orderStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Order cancellation is only allowed before the order is packed.'
-      });
-    }
+    const { reason = 'Cancelled by customer' } = req.body;
+    const previousStatus = order.orderStatus;
 
-    if (cutoff === 'Before Shipped' && ['Shipped', 'Delivered'].includes(order.orderStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Order cancellation is not permitted once the order has been shipped.'
-      });
-    }
-
-    if (['Delivered', 'Cancelled', 'CancellationRequested'].includes(order.orderStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: order.orderStatus === 'CancellationRequested'
-          ? 'Cancellation request already submitted. Awaiting admin approval.'
-          : `Cannot request cancellation for a ${order.orderStatus.toLowerCase()} order.`
-      });
-    }
-
-    const { reason } = req.body;
-
+    order.cancelledAt = new Date();
+    order.cancellationReason = reason;
     order.cancellationRequest = {
-      reason: reason || 'No reason provided',
+      isRequested: true,
+      reason,
+      status: 'Approved',
       requestedAt: new Date(),
-      previousStatus: order.orderStatus
+      previousStatus
     };
-    order.orderStatus = 'CancellationRequested';
+    order.orderStatus = 'Cancelled';
     order.statusHistory.push({
-      status:    'CancellationRequested',
-      from:      order.cancellationRequest.previousStatus,
+      status:    'Cancelled',
+      from:      previousStatus,
       changedAt: new Date(),
       changedBy: req.user._id,
-      note:      order.cancellationRequest.reason
+      note:      reason
     });
 
     await order.save();
 
-    // Notify the admin that a cancellation request has arrived (fire-and-forget).
+    // ── Restores product stock inside atomic / idempotent inventory handler ──
+    await stockService.restoreStockAfterCancel(order).catch((err) =>
+      console.error('⚠️  Stock restore error on cancel:', err.message)
+    );
+
+    // ── Release coupon allowance if one was claimed ──
+    if (order.couponUsed?.couponId) {
+      await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id).catch((err) =>
+        console.error('⚠️  Coupon release error on cancel:', err.message)
+      );
+    }
+
+    // Invalidate caches
+    statsCache.invalidate('admin:');
+    cacheService.invalidate('products:');
+    cacheService.invalidate('combos:');
+
+    // Notify customer & admin
     const customer = await User.findById(order.userId).select('name email phone');
-    notify.notifyAdminCancellationRequest(order, customer).catch((err) =>
-      console.error('⚠️  Cancellation-request admin notification failed:', err.message)
+    notify.sendStatusUpdate(order, customer, 'Cancelled').catch((err) =>
+      console.error('⚠️  Status update notification failed:', err.message)
     );
 
     res.status(200).json({
       success: true,
       data: order,
-      message: 'Cancellation request submitted. Admin will review and process it shortly.'
+      message: 'Order cancelled successfully. Inventory restored.'
     });
-    // Invalidate admin stats cache due to order status change (cancellation request)
-    statsCache.invalidate('admin:');
   } catch (error) {
     return serverError(res, error, 'orderController.js → cancelOrder');
   }
@@ -1116,5 +1168,398 @@ exports.deleteOrder = async (req, res) => {
     return serverError(res, error, 'orderController.js → deleteOrder');
   }
 };
+
+// @desc    Verify cart integrity (price changes, active status, available stock) before checkout payment
+// @route   POST /api/orders/verify-cart
+// @access  Public / Authenticated
+exports.verifyCartIntegrity = async (req, res) => {
+  try {
+    const { orderItems } = req.body;
+
+    if (!Array.isArray(orderItems) || orderItems.length === 0) {
+      return res.status(200).json({
+        success: true,
+        hasChanges: false,
+        changes: [],
+        verifiedItems: [],
+        subtotal: 0
+      });
+    }
+
+    const changes = [];
+    const verifiedItems = [];
+    let computedItemsPrice = 0;
+
+    for (const item of orderItems) {
+      if (!item.product) continue;
+      const quantity = Math.max(1, parseInt(item.quantity, 10) || 1);
+      const reportedPrice = Number(item.price) || 0;
+
+      if (item.productType === 'Combo') {
+        const combo = await Combo.findById(item.product).populate('products.product', 'name price stock isActive');
+        if (!combo || !combo.isActive) {
+          changes.push({
+            productId: item.product,
+            packageId: null,
+            name: item.name || 'Combo Pack',
+            type: 'unavailable',
+            message: `"${item.name || 'Combo Pack'}" is no longer available.`
+          });
+          continue;
+        }
+
+        // Check combo stock and child products stock
+        let availableStock = combo.stock !== undefined ? combo.stock : 999;
+        if (Array.isArray(combo.products)) {
+          for (const cp of combo.products) {
+            const childProd = cp.product;
+            const requiredPerCombo = cp.quantity || 1;
+            if (!childProd || !childProd.isActive) {
+              availableStock = 0;
+              break;
+            }
+            const possibleCombos = Math.floor((childProd.stock || 0) / requiredPerCombo);
+            if (possibleCombos < availableStock) {
+              availableStock = possibleCombos;
+            }
+          }
+        }
+
+        const currentPrice = Number(combo.price) || 0;
+
+        if (currentPrice !== reportedPrice) {
+          changes.push({
+            productId: item.product,
+            packageId: null,
+            name: combo.title || item.name,
+            type: 'price_changed',
+            oldPrice: reportedPrice,
+            newPrice: currentPrice,
+            message: `Price for "${combo.title || item.name}" changed from ₹${reportedPrice} to ₹${currentPrice}.`
+          });
+        }
+
+        if (availableStock < quantity) {
+          changes.push({
+            productId: item.product,
+            packageId: null,
+            name: combo.title || item.name,
+            type: availableStock === 0 ? 'out_of_stock' : 'stock_reduced',
+            requestedQuantity: quantity,
+            availableStock,
+            message: availableStock === 0
+              ? `"${combo.title || item.name}" is now out of stock.`
+              : `Only ${availableStock} units of "${combo.title || item.name}" left in stock (requested ${quantity}).`
+          });
+        }
+
+        const effectiveQty = Math.min(quantity, Math.max(0, availableStock));
+        const effectivePrice = currentPrice;
+        if (effectiveQty > 0) {
+          computedItemsPrice += effectivePrice * effectiveQty;
+          verifiedItems.push({
+            ...item,
+            quantity: effectiveQty,
+            price: effectivePrice,
+            name: combo.title || item.name,
+            availableStock
+          });
+        }
+      } else {
+        // Standard Product
+        const product = await Product.findById(item.product);
+        if (!product || !product.isActive) {
+          changes.push({
+            productId: item.product,
+            packageId: item.packageId || null,
+            name: item.name || 'Product',
+            type: 'unavailable',
+            message: `"${item.name || 'Product'}" is no longer available.`
+          });
+          continue;
+        }
+
+        let currentPrice = Number(product.price) || 0;
+        let availableStock = Number(product.stock) || 0;
+        let packageName = '';
+
+        if (item.packageId && Array.isArray(product.packages)) {
+          const pkg = product.packages.id(item.packageId);
+          if (!pkg) {
+            changes.push({
+              productId: item.product,
+              packageId: item.packageId,
+              name: item.name || product.name,
+              type: 'unavailable',
+              message: `The selected package for "${product.name}" is no longer available.`
+            });
+            continue;
+          }
+          currentPrice = Number(pkg.price) || 0;
+          availableStock = Number(pkg.stock) || 0;
+          packageName = pkg.size || pkg.packetSize || '';
+        }
+
+        if (currentPrice !== reportedPrice) {
+          changes.push({
+            productId: item.product,
+            packageId: item.packageId || null,
+            name: product.name + (packageName ? ` (${packageName})` : ''),
+            type: 'price_changed',
+            oldPrice: reportedPrice,
+            newPrice: currentPrice,
+            message: `Price for "${product.name}${packageName ? ` (${packageName})` : ''}" changed from ₹${reportedPrice} to ₹${currentPrice}.`
+          });
+        }
+
+        if (availableStock < quantity) {
+          changes.push({
+            productId: item.product,
+            packageId: item.packageId || null,
+            name: product.name + (packageName ? ` (${packageName})` : ''),
+            type: availableStock === 0 ? 'out_of_stock' : 'stock_reduced',
+            requestedQuantity: quantity,
+            availableStock,
+            message: availableStock === 0
+              ? `"${product.name}${packageName ? ` (${packageName})` : ''}" is now out of stock.`
+              : `Only ${availableStock} units of "${product.name}${packageName ? ` (${packageName})` : ''}" available in stock (requested ${quantity}).`
+          });
+        }
+
+        const effectiveQty = Math.min(quantity, Math.max(0, availableStock));
+        const effectivePrice = currentPrice;
+        if (effectiveQty > 0) {
+          computedItemsPrice += effectivePrice * effectiveQty;
+          verifiedItems.push({
+            ...item,
+            quantity: effectiveQty,
+            price: effectivePrice,
+            name: product.name,
+            availableStock
+          });
+        }
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      hasChanges: changes.length > 0,
+      changes,
+      verifiedItems,
+      subtotal: computedItemsPrice
+    });
+  } catch (error) {
+    return serverError(res, error, 'orderController.js → verifyCartIntegrity');
+  }
+};
+
+// @desc    Assign courier tracking (DTDC / Partner) & notify customer
+// @route   POST /api/orders/:id/track & POST /api/admin/orders/:id/track
+// @access  Private/Admin
+exports.updateOrderTracking = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const {
+      courierName,
+      courier,
+      trackingNumber,
+      awbNumber,
+      trackingUrl,
+      note,
+      status
+    } = req.body;
+
+    const finalCourier = courierName || courier || 'DTDC';
+    const finalTrackingNumber = trackingNumber || awbNumber;
+
+    if (!finalTrackingNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Tracking or consignment AWB number is required'
+      });
+    }
+
+    let finalTrackingUrl = trackingUrl;
+    if (!finalTrackingUrl && finalCourier.toUpperCase().includes('DTDC')) {
+      finalTrackingUrl = `https://www.dtdc.in/tracking.asp?strCnno=${finalTrackingNumber}`;
+    } else if (!finalTrackingUrl) {
+      finalTrackingUrl = `https://track.dtdc.com/?tracking_no=${finalTrackingNumber}`;
+    }
+
+    if (!order.shipping) order.shipping = {};
+    order.shipping.courierName = finalCourier;
+    order.shipping.awbNumber = finalTrackingNumber;
+    order.shipping.trackingUrl = finalTrackingUrl;
+    if (!order.shipping.shippedAt) {
+      order.shipping.shippedAt = new Date();
+    }
+
+    if (!order.shipping.trackingHistory) order.shipping.trackingHistory = [];
+    order.shipping.trackingHistory.push({
+      status: 'Consignment Assigned / In Transit',
+      location: order.shippingAddress?.city || 'Indore Fulfillment Center',
+      timestamp: new Date(),
+      remarks: note || `Dispatched via ${finalCourier}`
+    });
+
+    order.dtdc = {
+      consignmentNumber: finalTrackingNumber,
+      courier: finalCourier,
+      status: 'Booked',
+      trackingUrl: finalTrackingUrl,
+      bookedAt: new Date()
+    };
+
+    const previousStatus = order.orderStatus;
+    const targetStatus = status || (['Pending', 'Confirmed', 'Processing', 'Packed'].includes(previousStatus) ? 'Shipped' : previousStatus);
+
+    if (previousStatus !== targetStatus && canTransition(previousStatus, targetStatus)) {
+      order.orderStatus = targetStatus;
+    }
+
+    order.statusHistory.push({
+      status: order.orderStatus,
+      from: previousStatus,
+      changedAt: new Date(),
+      changedBy: req.user._id,
+      note: note || `Assigned ${finalCourier} consignment tracking ${finalTrackingNumber}`
+    });
+
+    await order.save();
+    statsCache.invalidate('admin:');
+
+    // Automatically trigger tracking update email/SMS notification to customer with live tracking URL
+    const customer = await User.findById(order.userId).select('name email phone');
+    notify.sendStatusUpdate(order, customer, 'Shipped').catch((err) =>
+      console.error('⚠️  Tracking update notification failed:', err.message)
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Tracking assigned via ${finalCourier}. Live tracking notification sent to customer.`,
+      data: order
+    });
+  } catch (error) {
+    return serverError(res, error, 'orderController.js → updateOrderTracking');
+  }
+};
+
+// @desc    Issue 1-click Razorpay refund for cancelled or return orders (Admin)
+// @route   POST /api/orders/:id/refund & POST /api/admin/orders/:id/refund
+// @access  Private/Admin
+exports.issueOrderRefund = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    // Check if refund was already completed
+    if (order.refund?.refundStatus === 'Processed') {
+      return res.status(409).json({
+        success: false,
+        message: `Refund of ₹${order.refund.refundAmount} was already processed on ${new Date(order.refund.refundedAt).toLocaleDateString()}. Refund ID: ${order.refund.refundId}`
+      });
+    }
+
+    const { amount, reason = 'Admin issued refund' } = req.body;
+    const refundAmount = amount ? Number(amount) : order.totalAmount;
+
+    if (!refundAmount || refundAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid refund amount is required'
+      });
+    }
+
+    // Razorpay refund handling
+    const paymentId = order.paymentDetails?.razorpayPaymentId;
+    let refundResult;
+
+    if (order.paymentMode === 'Online' || paymentId) {
+      refundResult = await razorpayService.refundPayment(paymentId, refundAmount);
+      if (!refundResult.success) {
+        return res.status(400).json({
+          success: false,
+          message: refundResult.message || 'Payment gateway refund request failed',
+          error: refundResult.message
+        });
+      }
+    } else {
+      // For COD orders where cash was collected or manual adjustment
+      refundResult = {
+        success: true,
+        data: {
+          id: `rfnd_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          status: 'processed'
+        }
+      };
+    }
+
+    const refundId = refundResult.data?.id || `rfnd_${Date.now()}`;
+
+    // Update order refund fields
+    order.paymentStatus = 'Refunded';
+    order.refund = {
+      refundId,
+      refundAmount,
+      refundStatus: 'Processed',
+      refundedAt: new Date(),
+      reason
+    };
+
+    const previousStatus = order.orderStatus;
+    if (order.orderStatus !== 'Cancelled' && canTransition(previousStatus, 'Cancelled')) {
+      order.orderStatus = 'Cancelled';
+      order.cancelledAt = new Date();
+    }
+
+    order.statusHistory.push({
+      status: order.orderStatus,
+      from: previousStatus,
+      changedAt: new Date(),
+      changedBy: req.user._id,
+      note: `Refund of ₹${refundAmount} issued (Gateway ID: ${refundId}). Reason: ${reason}`
+    });
+
+    await order.save();
+
+    // If order was holding inventory stock, restore it
+    await stockService.restoreStockAfterCancel(order).catch((err) =>
+      console.error('⚠️  Stock restore error on refund:', err.message)
+    );
+
+    if (order.couponUsed?.couponId) {
+      await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id).catch((err) =>
+        console.error('⚠️  Coupon release error on refund:', err.message)
+      );
+    }
+
+    // Invalidate caches
+    statsCache.invalidate('admin:');
+    cacheService.invalidate('products:');
+    cacheService.invalidate('combos:');
+
+    // Notify customer
+    const customer = await User.findById(order.userId).select('name email phone');
+    notify.sendRefundNotification(order, customer).catch((err) =>
+      console.error('⚠️  Refund notification failed:', err.message)
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Refund of ₹${refundAmount} processed successfully. (Refund ID: ${refundId})`,
+      data: order
+    });
+  } catch (error) {
+    return serverError(res, error, 'orderController.js → issueOrderRefund');
+  }
+};
+
+
 
 

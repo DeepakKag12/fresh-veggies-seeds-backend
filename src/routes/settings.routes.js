@@ -8,6 +8,10 @@ router.get('/', settingsController.getPublicSettings);
 
 // Admin settings routes
 router.get('/admin', protect, admin, settingsController.getAdminSettings);
+router.put('/', protect, admin, (req, res, next) => {
+  req.params.section = 'all';
+  settingsController.updateSettingsSection(req, res, next);
+});
 router.put('/admin/:section', protect, admin, settingsController.updateSettingsSection);
 router.post('/admin/reset/:section', protect, admin, settingsController.resetSettingsSection);
 

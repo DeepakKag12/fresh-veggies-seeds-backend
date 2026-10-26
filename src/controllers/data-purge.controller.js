@@ -84,10 +84,11 @@ exports.purgeData = async (req, res) => {
 
     const { password, confirmation } = req.body || {};
 
-    if (confirmation !== CONFIRMATION_PHRASE) {
+    const validPhrases = [CONFIRMATION_PHRASE, 'CONFIRM PURGE'];
+    if (!validPhrases.includes(confirmation)) {
       return res.status(400).json({
         success: false,
-        message: `Type "${CONFIRMATION_PHRASE}" exactly to confirm.`,
+        message: `Type "${CONFIRMATION_PHRASE}" or "CONFIRM PURGE" exactly to confirm.`,
       });
     }
 

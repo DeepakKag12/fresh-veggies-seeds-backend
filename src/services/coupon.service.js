@@ -49,10 +49,11 @@ exports.validateCoupon = async (code, itemsPrice, userId) => {
     return { valid: false, message: 'This coupon has expired.' };
   }
 
-  if (itemsPrice < coupon.minOrderAmount) {
+  const minAmount = coupon.minOrderAmount ?? coupon.minOrderValue ?? 0;
+  if (itemsPrice < minAmount) {
     return {
       valid: false,
-      message: `Add ₹${coupon.minOrderAmount - itemsPrice} more to use this coupon (minimum order ₹${coupon.minOrderAmount}).`
+      message: `Coupon valid on orders above ₹${minAmount} only (Add ₹${minAmount - itemsPrice} more).`
     };
   }
 
@@ -63,24 +64,31 @@ exports.validateCoupon = async (code, itemsPrice, userId) => {
   // Per-user limit. Only orders that actually stand count against the user:
   // a cancelled or payment-failed order must not consume someone's allowance.
   if (userId) {
-    const userUsageCount = await Order.countDocuments({
+    const userOrderCount = await Order.countDocuments({
       userId,
       'couponUsed.code': normalized,
       orderStatus:   { $ne: 'Cancelled' },
       paymentStatus: { $ne: 'Failed' }
     });
+    const userUsedByCount = Array.isArray(coupon.usedBy)
+      ? coupon.usedBy.filter(u => String(u.user) === String(userId)).length
+      : 0;
+    const userUsageCount = Math.max(userOrderCount, userUsedByCount);
 
-    if (coupon.perUserLimit && userUsageCount >= coupon.perUserLimit) {
+    const limit = coupon.perUserLimit || 1;
+    if (userUsageCount >= limit) {
       return { valid: false, message: 'You have already used this coupon.' };
     }
   }
 
   // ── Discount calculation ───────────────────────────────────────────────────
   let discountAmount;
-  if (coupon.discountType === 'percentage') {
+  const isPercentage = coupon.discountType === 'percentage' || coupon.discountType === 'PERCENTAGE';
+  if (isPercentage) {
     discountAmount = (itemsPrice * coupon.discountValue) / 100;
-    if (coupon.maxDiscountAmount) {
-      discountAmount = Math.min(discountAmount, coupon.maxDiscountAmount);
+    const maxDiscount = coupon.maxDiscountAmount ?? coupon.maxDiscount;
+    if (maxDiscount) {
+      discountAmount = Math.min(discountAmount, maxDiscount);
     }
   } else {
     discountAmount = coupon.discountValue;
@@ -93,16 +101,11 @@ exports.validateCoupon = async (code, itemsPrice, userId) => {
 };
 
 /**
- * Atomically claim one use of a coupon.
- *
- * The usageLimit check lives inside the update filter, so two orders racing for
- * the last available use cannot both succeed — whichever update matches first
- * takes it and the other comes back null. Checking then incrementing in two
- * steps would let both through.
+ * Atomically claim one use of a coupon and track in usedBy.
  *
  * @returns {Promise<boolean>} true if a use was claimed
  */
-exports.redeemCoupon = async (couponId) => {
+exports.redeemCoupon = async (couponId, userId = null, orderId = null, discountAmount = 0) => {
   const coupon = await Coupon.findById(couponId).select('usageLimit');
   if (!coupon) return false;
 
@@ -111,7 +114,19 @@ exports.redeemCoupon = async (couponId) => {
     ? { _id: couponId, usedCount: { $lt: coupon.usageLimit } }
     : { _id: couponId };
 
-  const result = await Coupon.updateOne(filter, { $inc: { usedCount: 1 } });
+  const update = { $inc: { usedCount: 1 } };
+  if (userId) {
+    update.$push = {
+      usedBy: {
+        user: userId,
+        orderId: orderId || null,
+        usedAt: new Date(),
+        discountAmount: discountAmount || 0,
+      }
+    };
+  }
+
+  const result = await Coupon.updateOne(filter, update);
   return result.modifiedCount === 1;
 };
 
@@ -120,12 +135,18 @@ exports.redeemCoupon = async (couponId) => {
  * cancelled or its payment never completed. Floors at zero so a double release
  * can never drive the counter negative.
  */
-exports.releaseCoupon = async (couponId) => {
+exports.releaseCoupon = async (couponId, userId = null, orderId = null) => {
   if (!couponId) return;
   try {
+    const update = { $inc: { usedCount: -1 } };
+    if (userId || orderId) {
+      update.$pull = {
+        usedBy: orderId ? { orderId } : { user: userId }
+      };
+    }
     await Coupon.updateOne(
       { _id: couponId, usedCount: { $gt: 0 } },
-      { $inc: { usedCount: -1 } }
+      update
     );
   } catch (err) {
     console.error('⚠️  Coupon release error:', err.message);
@@ -141,7 +162,7 @@ exports.releaseCoupon = async (couponId) => {
  *
  * @throws {Error} with a customer-safe message when the coupon is not usable
  */
-exports.applyCouponToOrder = async (code, itemsPrice, userId) => {
+exports.applyCouponToOrder = async (code, itemsPrice, userId, orderId = null) => {
   if (!code) return { discountAmount: 0, couponUsed: null };
 
   const result = await exports.validateCoupon(code, itemsPrice, userId);
@@ -151,7 +172,7 @@ exports.applyCouponToOrder = async (code, itemsPrice, userId) => {
     throw err;
   }
 
-  const claimed = await exports.redeemCoupon(result.coupon._id);
+  const claimed = await exports.redeemCoupon(result.coupon._id, userId, orderId, result.discountAmount);
   if (!claimed) {
     const err = new Error('This coupon has just reached its usage limit.');
     err.isCouponError = true;

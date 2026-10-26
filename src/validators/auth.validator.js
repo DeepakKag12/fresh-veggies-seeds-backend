@@ -8,7 +8,7 @@
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 // Indian mobile: 10 digits starting 6-9, optionally +91 / 0 prefixed.
-const PHONE_RE = /^(?:\+?91[-\s]?)?[6-9]\d{9}$/;
+const PHONE_RE = /^(?:\+?91[-\s]?|0)?[6-9]\d{9}$/;
 
 const isValidEmail = (email) =>
   typeof email === 'string' && email.length <= 254 && EMAIL_RE.test(email.trim());
@@ -56,7 +56,7 @@ const validateCart = (cart) => {
     if (!item || typeof item !== 'object') {
       return { valid: false, message: 'Cart item must be an object.' };
     }
-    const productId = item.product || item._id;
+    const productId = item.product || item._id || item.productId || item.id;
     if (!productId || (typeof productId !== 'string' && typeof productId !== 'object')) {
       return { valid: false, message: 'Cart item requires a product id.' };
     }

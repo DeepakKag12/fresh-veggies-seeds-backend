@@ -40,9 +40,13 @@ exports.getActiveCoupons = async (req, res) => {
         isActive: true,
         isDeleted: { $ne: true },
         startDate: { $lte: now },
-        expiryDate: { $gte: now }
+        $or: [
+          { expiryDate: { $gte: now } },
+          { endDate: { $gte: now } },
+          { expiryDate: null, endDate: null }
+        ]
       })
-        .select('code description discountType discountValue minOrderAmount')
+        .select('code description discountType discountValue minOrderAmount minOrderValue maxDiscountAmount maxDiscount expiryDate endDate startDate usageLimit perUserLimit')
         .lean();
 
     const payload = {
@@ -58,13 +62,13 @@ exports.getActiveCoupons = async (req, res) => {
   }
 };
 
-// @desc    Validate and apply coupon
+// @desc    Validate coupon
 // @route   POST /api/coupons/validate
-// @access   Private
+// @access  Public / Optional Auth
 exports.validateCoupon = async (req, res) => {
   try {
     const { code } = req.body;
-    const orderAmount = req.body.orderAmount ?? req.body.itemsPrice ?? 0;
+    const orderAmount = req.body.orderAmount ?? req.body.itemsPrice ?? req.body.orderTotal ?? req.body.subtotal ?? 0;
 
     // Delegates to couponService so this preview and the discount actually
     // applied at checkout can never disagree — they run the same code.
@@ -76,15 +80,53 @@ exports.validateCoupon = async (req, res) => {
 
     res.status(200).json({
       success: true,
+      message: `Coupon ${result.coupon.code} is valid! You save ₹${result.discountAmount}!`,
       data: {
         couponId:       result.coupon._id,
         code:           result.coupon.code,
+        description:    result.coupon.description,
+        discountType:   result.coupon.discountType,
+        discountValue:  result.coupon.discountValue,
         discountAmount: result.discountAmount,
-        finalAmount:    (Number(orderAmount) || 0) - result.discountAmount
+        finalAmount:    (Number(orderAmount) || 0) - result.discountAmount,
+        savingsText:    `You saved ₹${result.discountAmount}!`
       }
     });
   } catch (error) {
     return serverError(res, error, 'couponController.js → validateCoupon');
+  }
+};
+
+// @desc    Apply coupon (Domino's / Zomato instant celebration response)
+// @route   POST /api/coupons/apply
+// @access  Public / Optional Auth
+exports.applyCoupon = async (req, res) => {
+  try {
+    const { code } = req.body;
+    const orderAmount = req.body.orderAmount ?? req.body.itemsPrice ?? req.body.orderTotal ?? req.body.subtotal ?? 0;
+
+    const result = await couponService.validateCoupon(code, Number(orderAmount) || 0, req.user?._id || null);
+
+    if (!result.valid) {
+      return res.status(400).json({ success: false, message: result.message });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Coupon ${result.coupon.code} applied successfully! You saved ₹${result.discountAmount}!`,
+      data: {
+        couponId:       result.coupon._id,
+        code:           result.coupon.code,
+        description:    result.coupon.description,
+        discountType:   result.coupon.discountType,
+        discountValue:  result.coupon.discountValue,
+        discountAmount: result.discountAmount,
+        finalAmount:    (Number(orderAmount) || 0) - result.discountAmount,
+        savingsText:    `You saved ₹${result.discountAmount}!`
+      }
+    });
+  } catch (error) {
+    return serverError(res, error, 'couponController.js → applyCoupon');
   }
 };
 

@@ -238,6 +238,7 @@ exports.createReview = async (req, res) => {
         comment: comment.trim().slice(0, 1000),
         images: sanitizedImages,
         isVerifiedPurchase: isVerified,
+        isVerifiedBuyer: isVerified,
         isApproved: false // Requires moderation before public display
       });
     } catch (err) {
@@ -435,3 +436,5 @@ exports.voteHelpful = async (req, res) => {
     return serverError(res, error, 'reviewController.js → voteHelpful');
   }
 };
+
+exports.updateProductRating = updateProductRating;

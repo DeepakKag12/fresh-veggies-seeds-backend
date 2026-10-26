@@ -4,6 +4,7 @@ const {
   getAllCoupons,
   getActiveCoupons,
   validateCoupon,
+  applyCoupon,
   createCoupon,
   updateCoupon,
   deleteCoupon
@@ -13,6 +14,7 @@ const validateObjectId = require('../middleware/validate-object-id.middleware');
 
 router.get('/active', getActiveCoupons);
 router.post('/validate', optionalAuth, validateCoupon);
+router.post('/apply', optionalAuth, applyCoupon);
 
 router.route('/')
   .get(protect, admin, getAllCoupons)

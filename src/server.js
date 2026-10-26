@@ -1,10 +1,12 @@
 const express = require('express');
+const http = require('http');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
+const { initSocket } = require('./socket');
 
 // Load environment variables FIRST before anything else
 dotenv.config();
@@ -263,8 +265,7 @@ app.get('/health/config', require('./middleware/auth.middleware').protect, requi
     FRONTEND_URL:    process.env.FRONTEND_URL,
     RAZORPAY_KEY_ID: !!process.env.RAZORPAY_KEY_ID,
     WEBHOOK_SECRET:  !!process.env.RAZORPAY_WEBHOOK_SECRET,
-    BREVO_SMTP:      !!process.env.BREVO_SMTP_USER,
-    ADMIN_WHATSAPP:  !!process.env.ADMIN_WHATSAPP_NUMBER
+    BREVO_SMTP:      !!process.env.BREVO_SMTP_USER
   });
 });
 
@@ -278,6 +279,10 @@ app.use(async (req, res, next) => {
     res.status(500).json({ success: false, message: 'Database connection failed. Please try again.' });
   }
 });
+
+// ─── Audit Logging Middleware ────────────────────────────────────────────────
+const auditMiddleware = require('./middleware/audit.middleware');
+app.use('/api', auditMiddleware);
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 const authRoutes = require('./routes/auth.routes');
@@ -305,6 +310,7 @@ app.use('/api/reviews',     require('./routes/review.routes'));
 app.use('/api/banners',     publicCache({ maxAge: 120, sMaxAge: 300, staleWhileRevalidate: 600 }), require('./routes/banner.routes'));
 app.use('/api/settings',    publicCache({ maxAge: 300, sMaxAge: 600, staleWhileRevalidate: 1800 }), require('./routes/settings.routes'));
 app.use('/api/contact',     require('./routes/contact.routes'));
+app.use('/api/chat',        require('./routes/chat.routes'));
 
 // ─── Root / Health ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -329,8 +335,11 @@ if (process.env.VERCEL) {
   // In Vercel serverless functions, Vercel invokes the exported app directly
   console.log('⚡ Running in Vercel serverless mode');
 } else {
-  server = app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+  server = http.createServer(app);
+  initSocket(server, corsOptions);
+
+  server.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT} (HTTP + WebSockets)`);
     connectDB().catch((err) => console.error('MongoDB initial connection error:', err.message));
   });
 

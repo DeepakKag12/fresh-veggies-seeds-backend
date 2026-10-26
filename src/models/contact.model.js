@@ -33,8 +33,13 @@ const contactSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['new', 'read', 'replied', 'archived'],
+    enum: ['new', 'read', 'replied', 'archived', 'pending', 'resolved'],
     default: 'new'
+  },
+  adminNotes: {
+    type: String,
+    default: '',
+    maxlength: [2000, 'Admin notes cannot exceed 2000 characters']
   },
   ipAddress: {
     type: String,

@@ -56,6 +56,11 @@ exports.getPublicSettings = async (req, res) => {
           onlineDiscountValue: settings.payments.onlineDiscountValue ?? 0,
           onlineDiscountMaxLimit: settings.payments.onlineDiscountMaxLimit ?? 100,
         },
+        maintenance: settings.maintenance || {
+          isStoreClosed: false,
+          closureNotice: '',
+          announcementBanner: { enabled: false, message: '', link: '', type: 'info' },
+        },
       },
     };
 
@@ -100,14 +105,14 @@ exports.getAdminSettings = async (req, res) => {
 };
 
 // @desc    Update a settings section or all settings
-// @route   PUT /api/settings/admin/:section
+// @route   PUT /api/settings/admin/:section or PUT /api/settings
 // @access  Private/Admin
 exports.updateSettingsSection = async (req, res) => {
   try {
-    const { section } = req.params;
+    const section = req.params?.section || 'all';
     const updateData = req.body;
 
-    const validSections = ['store', 'delivery', 'orders', 'inventory', 'payments', 'notifications'];
+    const validSections = ['store', 'delivery', 'orders', 'inventory', 'payments', 'notifications', 'maintenance'];
     if (section !== 'all' && !validSections.includes(section)) {
       return res.status(400).json({ success: false, message: `Invalid settings section: ${section}` });
     }
@@ -155,7 +160,7 @@ exports.resetSettingsSection = async (req, res) => {
     const { section } = req.params;
     const defaults = Settings.getDefaults();
 
-    const validSections = ['store', 'delivery', 'orders', 'inventory', 'payments', 'notifications'];
+    const validSections = ['store', 'delivery', 'orders', 'inventory', 'payments', 'notifications', 'maintenance'];
     if (section !== 'all' && !validSections.includes(section)) {
       return res.status(400).json({ success: false, message: `Invalid settings section: ${section}` });
     }

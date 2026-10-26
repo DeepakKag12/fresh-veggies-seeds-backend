@@ -4,8 +4,7 @@
  * Every customer- and admin-facing message about an order's lifecycle.
  *
  * Before this existed the order flow was silent: a customer got no confirmation
- * and no delivery updates, and the admin was never told a new order had arrived
- * (whatsappService.sendNewOrderNotification was written but never called). The
+ * and no delivery updates, and the admin was never told a new order had arrived. The
  * only way to notice a sale was to open the admin panel and look.
  *
  * Delivery rules:
@@ -15,7 +14,6 @@
  */
 
 const nodemailer      = require('nodemailer');
-const whatsappService = require('../services/whatsapp.service');
 const Settings        = require('../models/settings.model');
 
 const transporter = nodemailer.createTransport({
@@ -130,7 +128,6 @@ exports.sendOrderConfirmation = async (order, user) => {
 exports.notifyAdminNewOrder = async (order, user) => {
   const settings = await Settings.getSingleton().catch(() => null);
   const emailEnabled = settings ? settings.notifications?.admin?.newOrder?.email !== false : true;
-  const whatsappEnabled = settings ? settings.notifications?.admin?.newOrder?.whatsapp !== false : true;
 
   const promises = [];
 
@@ -152,10 +149,6 @@ exports.notifyAdminNewOrder = async (order, user) => {
         )
       );
     }
-  }
-
-  if (whatsappEnabled) {
-    promises.push(whatsappService.sendNewOrderNotification(order, user || {}));
   }
 
   const results = await Promise.allSettled(promises);

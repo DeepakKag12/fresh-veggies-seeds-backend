@@ -20,7 +20,7 @@ const bannerSchema = new mongoose.Schema({
   },
   linkType: {
     type: String,
-    enum: ['product', 'category', 'external', 'none'],
+    enum: ['product', 'category', 'internal', 'external', 'none'],
     default: 'none'
   },
   position: {

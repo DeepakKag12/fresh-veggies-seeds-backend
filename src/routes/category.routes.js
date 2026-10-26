@@ -5,7 +5,8 @@ const {
   getCategory,
   createCategory,
   updateCategory,
-  deleteCategory
+  deleteCategory,
+  reorderCategories
 } = require('../controllers/category.controller');
 const { protect, admin } = require('../middleware/auth.middleware');
 const validateObjectId = require('../middleware/validate-object-id.middleware');
@@ -13,6 +14,8 @@ const validateObjectId = require('../middleware/validate-object-id.middleware');
 router.route('/')
   .get(getCategories)
   .post(protect, admin, createCategory);
+
+router.put('/reorder', protect, admin, reorderCategories);
 
 router.route('/:id')
   .get(validateObjectId, getCategory)

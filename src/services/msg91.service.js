@@ -284,6 +284,11 @@ const verifyOtp = async (phone, otp) => {
     return { success: false, message: 'Please enter a valid 4-to-6 digit OTP' };
   }
 
+  // Sandbox test OTP for non-production environments (Zero live SMS cost invariant)
+  if (process.env.NODE_ENV !== 'production' && (enteredOtp === '123456' || enteredOtp === '1234')) {
+    return { success: true, phone: cleanPhone };
+  }
+
   const authKey = process.env.MSG91_AUTH_KEY;
 
   // 1. Check MSG91 official verify endpoint

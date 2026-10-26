@@ -14,6 +14,12 @@ const {
   verifyOTP,
   getCart,
   updateCart,
+  syncCart,
+  getWishlist,
+  addToWishlist,
+  removeFromWishlist,
+  clearWishlist,
+  syncWishlist,
   verifyEmail,
   verifyMsg91Token,
   sendMsg91Otp,
@@ -85,16 +91,32 @@ router.post('/verify-otp', otpVerifyLimiter, verifyOTP);
 // Protected routes
 router.post('/logout', protect, logout);
 router.get('/me', protect, getMe);
+router.get('/profile', protect, getMe);
 router.get('/cart', protect, getCart);
+router.post('/cart', protect, updateCart);
 router.put('/cart', protect, updateCart);
+router.put('/cart/sync', protect, syncCart);
+router.post('/cart/sync', protect, syncCart);
+
+// Wishlist management (Nike / ASOS benchmark)
+router.get('/wishlist', protect, getWishlist);
+router.post('/wishlist/sync', protect, syncWishlist);
+router.put('/wishlist/sync', protect, syncWishlist);
+router.delete('/wishlist', protect, clearWishlist);
+router.post('/wishlist/:productId', protect, validateObjectId('productId'), addToWishlist);
+router.delete('/wishlist/:productId', protect, validateObjectId('productId'), removeFromWishlist);
 router.put('/profile', protect, updateProfile);
 router.put('/change-email', protect, changeEmail);
 router.put('/change-password', protect, changePassword);
 
-// Delivery address management
+// Delivery address management (supports both /addresses and /address)
 router.post('/addresses', protect, addAddress);
+router.post('/address', protect, addAddress);
 router.put('/addresses/:addressId', protect, validateObjectId('addressId'), updateAddress);
+router.put('/address/:addressId', protect, validateObjectId('addressId'), updateAddress);
 router.delete('/addresses/:addressId', protect, validateObjectId('addressId'), deleteAddress);
+router.delete('/address/:addressId', protect, validateObjectId('addressId'), deleteAddress);
 router.put('/addresses/:addressId/default', protect, validateObjectId('addressId'), setDefaultAddress);
+router.put('/address/:addressId/default', protect, validateObjectId('addressId'), setDefaultAddress);
 
 module.exports = router;

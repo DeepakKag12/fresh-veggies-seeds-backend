@@ -47,6 +47,19 @@ const comboSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  dynamicStock: {
+    type: Number,
+    default: 0
+  },
+  needsReview: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  reviewReason: {
+    type: String,
+    default: ''
+  },
   isActive: {
     type: Boolean,
     default: true
