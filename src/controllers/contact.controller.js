@@ -2,6 +2,7 @@ const Contact = require('../models/contact.model');
 const Conversation = require('../models/conversation.model');
 const ChatMessage = require('../models/chat-message.model');
 const { getIO } = require('../socket');
+const { verifyGuestCapability } = require('../utils/chat-security.util');
 
 /**
  * @desc    Submit customer contact inquiry
@@ -12,21 +13,21 @@ exports.submitContactInquiry = async (req, res) => {
   try {
     const { name, email, phone, subject, message, guestId } = req.body;
 
-    if (!name || !name.trim() || name.trim().length < 2) {
+    if (!name || !name.trim() || name.trim().length < 2 || name.trim().length > 100) {
       return res.status(400).json({
         success: false,
         message: 'Please provide your full name (at least 2 characters).'
       });
     }
 
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    if (!email || email.trim().length > 160 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
       return res.status(400).json({
         success: false,
         message: 'Please provide a valid email address.'
       });
     }
 
-    if (!message || message.trim().length < 10) {
+    if (!message || message.trim().length < 10 || message.trim().length > 4000) {
       return res.status(400).json({
         success: false,
         message: 'Please provide a message explaining your inquiry (at least 10 characters).'
@@ -50,22 +51,26 @@ exports.submitContactInquiry = async (req, res) => {
       name: name.trim(),
       email: email.trim().toLowerCase(),
       phone: cleanPhone,
-      subject: subject && subject.trim() ? subject.trim() : 'General Inquiry',
-      message: message.trim(),
+      subject: subject && subject.trim() ? subject.trim().slice(0, 200) : 'General Inquiry',
+      message: message.trim().slice(0, 4000),
       ipAddress: req.ip || req.headers['x-forwarded-for'] || ''
     });
 
     // 2. Direct-to-Chat Bridge: Automatically route message to Live Chat Section (/admin/communication)
     let conv = null;
     const userId = req.user?._id;
-    const effectiveGuestId = guestId || req.headers['x-guest-id'] || null;
+    const candidateGuestId = guestId || req.headers['x-guest-id'] || null;
+    const guestCapability = req.headers['x-guest-capability'] || req.body?.guestCapability || req.query?.guestCapability;
+    const effectiveGuestId = /^guest_[a-f0-9]{32}$/i.test(candidateGuestId) &&
+      verifyGuestCapability(candidateGuestId, guestCapability)
+      ? candidateGuestId
+      : null;
 
     if (userId) {
       conv = await Conversation.findOne({ customerId: userId, status: { $ne: 'archived' } });
     }
-    if (!conv && cleanPhone) {
-      conv = await Conversation.findOne({ customerPhone: cleanPhone, status: { $ne: 'archived' } });
-    }
+    // Never use an unverified, user-supplied phone number as a conversation
+    // ownership key. Link only by authenticated user or guest capability.
     if (!conv && effectiveGuestId) {
       conv = await Conversation.findOne({ guestId: effectiveGuestId, status: { $ne: 'archived' } });
     }
@@ -87,8 +92,8 @@ exports.submitContactInquiry = async (req, res) => {
       if (userId && !conv.customerId) conv.customerId = userId;
     }
 
-    const subjectLabel = subject && subject.trim() ? subject.trim() : 'General Inquiry';
-    const chatText = `[Contact Inquiry: ${subjectLabel}]\n${message.trim()}`;
+    const subjectLabel = subject && subject.trim() ? subject.trim().slice(0, 200) : 'General Inquiry';
+    const chatText = `[Contact Inquiry: ${subjectLabel}]\n${message.trim().slice(0, 4000)}`;
 
     const chatMsg = await ChatMessage.create({
       conversationId: conv._id,

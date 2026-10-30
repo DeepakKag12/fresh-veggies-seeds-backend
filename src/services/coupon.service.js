@@ -136,14 +136,10 @@ exports.redeemCoupon = async (couponId, userId = null, orderId = null, discountA
  * can never drive the counter negative.
  */
 exports.releaseCoupon = async (couponId, userId = null, orderId = null) => {
-  if (!couponId) return;
+  if (!couponId || (!userId && !orderId)) return;
   try {
     const update = { $inc: { usedCount: -1 } };
-    if (userId || orderId) {
-      update.$pull = {
-        usedBy: orderId ? { orderId } : { user: userId }
-      };
-    }
+    update.$pull = { usedBy: orderId ? { orderId } : { user: userId } };
     await Coupon.updateOne(
       { _id: couponId, usedCount: { $gt: 0 } },
       update

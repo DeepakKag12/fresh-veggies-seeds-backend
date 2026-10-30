@@ -76,8 +76,29 @@ exports.reserveStock = async (items) => {
       claimed = await Combo.findOneAndUpdate(
         { _id: item.product, stock: { $gte: qty } },
         { $inc: { stock: -qty } },
-        { new: true, select: 'name' }
+        { new: true, select: 'name includedProducts' }
       );
+      if (claimed && Array.isArray(claimed.includedProducts)) {
+        taken.push({ product: item.product, quantity: qty, productType: 'Combo', name: item.name });
+        for (const included of claimed.includedProducts) {
+          const childQty = Math.max(1, Number(included.quantity) || 1) * qty;
+          const childClaimed = await Product.findOneAndUpdate(
+            { _id: included.productId, isActive: true, isDeleted: { $ne: true }, stock: { $gte: childQty } },
+            { $inc: { stock: -childQty } },
+            { new: true, select: 'name' }
+          );
+          if (!childClaimed) {
+            claimed = null;
+            break;
+          }
+          taken.push({
+            product: included.productId,
+            quantity: childQty,
+            productType: 'Product',
+            name: childClaimed.name
+          });
+        }
+      }
     } else {
       claimed = await Product.findOneAndUpdate(
         { _id: item.product, stock: { $gte: qty } },
@@ -93,12 +114,19 @@ exports.reserveStock = async (items) => {
       throw err;
     }
 
-    taken.push({ product: item.product, quantity: qty, packageId: item.packageId, productType: item.productType, name: item.name });
+    if (!taken.some((entry) =>
+      entry.productType === item.productType &&
+      String(entry.product) === String(item.product) &&
+      entry.quantity === qty &&
+      entry.packageId === item.packageId
+    )) {
+      taken.push({ product: item.product, quantity: qty, packageId: item.packageId, productType: item.productType, name: item.name });
+    }
   }
 
   cacheService.invalidate('products:');
   cacheService.invalidate('combos:');
-  return true;
+  return taken;
 };
 
 /**
@@ -118,6 +146,14 @@ exports.restoreReservedStock = async (items) => {
         );
       } else if (t.productType === 'Combo') {
         await Combo.updateOne({ _id: t.product }, { $inc: { stock: qty } });
+        const hasConstituents = items.some(other => other !== t && other.productType === 'Product');
+        if (!hasConstituents) {
+          const combo = await Combo.findById(t.product).select('includedProducts').lean();
+          for (const inc of combo?.includedProducts || []) {
+            const childQty = Math.max(1, Number(inc.quantity) || 1) * qty;
+            await Product.updateOne({ _id: inc.productId }, { $inc: { stock: childQty } });
+          }
+        }
       } else {
         await Product.updateOne({ _id: t.product }, { $inc: { stock: qty } });
       }
@@ -165,6 +201,14 @@ exports.decrementStockAfterConfirm = async (order) => {
           { $inc: { stock: -item.quantity } },
           { new: true, select: 'name stock' }
         );
+        const comboDoc = await Combo.findById(item.product).select('includedProducts').lean();
+        for (const included of comboDoc?.includedProducts || []) {
+          const childQty = Math.max(1, Number(included.quantity) || 1) * item.quantity;
+          await Product.findOneAndUpdate(
+            { _id: included.productId, stock: { $gte: childQty } },
+            { $inc: { stock: -childQty } }
+          );
+        }
         if (!updatedCombo) {
           console.error(`🚨 OVERSOLD COMBO: order ${order._id} needs ${item.quantity} of combo ${item.product}`);
           oversold.push({ name: item.name || 'Combo', required: item.quantity, available: 0 });
@@ -314,6 +358,11 @@ exports.restoreStockAfterCancel = async (order) => {
         );
         if (updated) {
           console.log(`↩ Restored ${item.quantity} unit(s) of Combo "${updated.name}" → ${updated.stock} in stock`);
+        }
+        const combo = await Combo.findById(item.product).select('includedProducts').lean();
+        for (const included of combo?.includedProducts || []) {
+          const childQty = Math.max(1, Number(included.quantity) || 1) * item.quantity;
+          await Product.findByIdAndUpdate(included.productId, { $inc: { stock: childQty } });
         }
       } catch (err) {
         console.error(`⚠️  Stock restore error for combo ${item.product}:`, err.message);

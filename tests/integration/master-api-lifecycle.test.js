@@ -1,6 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const axios = require('axios');
+const crypto = require('crypto');
+const path = require('path');
+const dotenv = require('dotenv');
+
+dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 const BASE_URL = 'http://localhost:5000/api';
 
@@ -14,6 +19,31 @@ const testEmail = `master_qa_${uniqueTimestamp}@example.com`;
 const testPhone = `9${String(uniqueTimestamp).slice(-9)}`;
 
 test('Master Full-Stack Integration & API Lifecycle Suite', { concurrency: false }, async (t) => {
+
+  await t.test('0. Boot In-Process Server If Not Already Running', async () => {
+    let isRunning = false;
+    try {
+      const res = await axios.get('http://localhost:5000/health', { timeout: 1000 });
+      if (res.status === 200 || res.status === 503) {
+        isRunning = true;
+      }
+    } catch {
+      isRunning = false;
+    }
+
+    if (!isRunning) {
+      require('../../src/server');
+      for (let i = 0; i < 20; i++) {
+        try {
+          await new Promise((r) => setTimeout(r, 500));
+          await axios.get('http://localhost:5000/health', { timeout: 1000 });
+          isRunning = true;
+          break;
+        } catch {}
+      }
+    }
+    assert.strictEqual(isRunning, true, 'Server must be reachable for API lifecycle testing');
+  });
 
   await t.test('1. Customer Registration & Token Generation', async () => {
     const regRes = await axios.post(`${BASE_URL}/auth/register`, {
@@ -175,7 +205,8 @@ test('Master Full-Stack Integration & API Lifecycle Suite', { concurrency: false
   });
 
   await t.test('8. Real-time Live Chat & Guest Support Flow', async () => {
-    const guestId = `guest_master_${uniqueTimestamp}`;
+    const guestHex = crypto.randomBytes(16).toString('hex');
+    const guestId = `guest_${guestHex}`;
     
     // Init conversation
     const initRes = await axios.post(`${BASE_URL}/chat/init`, {
@@ -186,26 +217,33 @@ test('Master Full-Stack Integration & API Lifecycle Suite', { concurrency: false
     assert.strictEqual(initRes.status, 200);
     assert.ok(initRes.data.conversation._id);
     testConversationId = initRes.data.conversation._id;
+    const guestCapability = initRes.data.guestCapability;
 
     // Send message
     const msgRes = await axios.post(`${BASE_URL}/chat/conversations/${testConversationId}/messages`, {
       guestId,
+      guestCapability,
       customerName: 'Ananya Roy',
       customerPhone: '9876543210',
       text: 'Do you provide delivery tracking on WhatsApp?'
+    }, {
+      headers: { 'x-guest-capability': guestCapability }
     });
     assert.strictEqual(msgRes.status, 201);
     assert.strictEqual(msgRes.data.message.status, 'sent');
 
     // Fetch messages
-    const listRes = await axios.get(`${BASE_URL}/chat/conversations/${testConversationId}/messages?guestId=${guestId}`);
+    const listRes = await axios.get(`${BASE_URL}/chat/conversations/${testConversationId}/messages?guestId=${guestId}&guestCapability=${guestCapability}`, {
+      headers: { 'x-guest-capability': guestCapability }
+    });
     assert.strictEqual(listRes.status, 200);
     assert.ok(Array.isArray(listRes.data.messages));
     assert.ok(listRes.data.messages.length >= 1);
 
     // BOLA / IDOR Protection: Attacker guest blocked
     try {
-      await axios.get(`${BASE_URL}/chat/conversations/${testConversationId}/messages?guestId=attacker_guest_999`);
+      const attackerGuestId = `guest_${crypto.randomBytes(16).toString('hex')}`;
+      await axios.get(`${BASE_URL}/chat/conversations/${testConversationId}/messages?guestId=${attackerGuestId}`);
       assert.fail('Attacker guest should be blocked with 403');
     } catch (err) {
       assert.strictEqual(err.response?.status, 403);
@@ -223,4 +261,11 @@ test('Master Full-Stack Integration & API Lifecycle Suite', { concurrency: false
     assert.strictEqual(res.status, 201);
     assert.strictEqual(res.data.success, true);
   });
+});
+
+test.after(async () => {
+  const mongoose = require('mongoose');
+  await mongoose.disconnect().catch(() => {});
+  // Allow test runner to complete cleanly
+  setTimeout(() => process.exit(0), 100);
 });

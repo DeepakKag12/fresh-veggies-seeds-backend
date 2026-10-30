@@ -8,68 +8,12 @@ const User          = require('../models/user.model');
 const couponService = require('../services/coupon.service');
 const { buildVerifiedItems } = require('../services/pricing.service');
 const notify        = require('../services/order-notification.service');
+const notificationDelivery = require('../services/order-notification-delivery.service');
 
 // Shared with orderController so COD and online checkouts price identically.
 const { computeShippingPrice, computeOnlineDiscount, getShippingRules } = require('../config/order.config');
 const statsCache = require('../utils/stats-cache.util');
-const saveAddressToUser = async (userId, shippingAddress) => {
-  try {
-    if (!userId || !shippingAddress || !shippingAddress.street) return;
-    const user = await User.findById(userId);
-    if (!user) return;
-
-    if (!user.addresses) user.addresses = [];
-
-    const exists = user.addresses.some(
-      a => (a.street || '').trim().toLowerCase() === (shippingAddress.street || '').trim().toLowerCase() &&
-           (a.pincode || '').trim() === (shippingAddress.pincode || '').trim()
-    );
-
-    const isFirst = user.addresses.length === 0;
-
-    if (!exists) {
-      user.addresses.push({
-        name: shippingAddress.name || user.name,
-        phone: shippingAddress.phone || user.phone,
-        street: shippingAddress.street,
-        city: shippingAddress.city,
-        state: shippingAddress.state,
-        pincode: shippingAddress.pincode,
-        country: shippingAddress.country || 'India',
-        isDefault: isFirst,
-        createdAt: new Date()
-      });
-    }
-
-    if (!user.address?.street || isFirst) {
-      user.address = {
-        street: shippingAddress.street,
-        city: shippingAddress.city,
-        state: shippingAddress.state,
-        pincode: shippingAddress.pincode,
-        country: shippingAddress.country || 'India'
-      };
-    }
-
-    // Update user name if currently default or placeholder
-    if (shippingAddress.name && (!user.name || /^customer(\s*\d+)?$/i.test(user.name.trim()))) {
-      user.name = shippingAddress.name.trim();
-    }
-
-    // Save optional email if not yet set on profile and not already registered to another user
-    if (shippingAddress.email && !user.email) {
-      const emailCandidate = shippingAddress.email.trim().toLowerCase();
-      const existingUserWithEmail = await User.findOne({ email: emailCandidate, _id: { $ne: user._id } });
-      if (!existingUserWithEmail) {
-        user.email = emailCandidate;
-      }
-    }
-
-    await user.save({ validateBeforeSave: false });
-  } catch (err) {
-    console.error('Error saving address to user profile:', err.message);
-  }
-};
+const { saveAddressToUser } = require('../services/address.service');
 
 // @desc    Create Razorpay Order (price computed on server)
 // @route   POST /api/payments/create-order
@@ -141,8 +85,16 @@ exports.createRazorpayOrder = async (req, res) => {
     const computedTotal = computedItemsPrice + shippingPrice - discountAmount - onlineDiscount;
 
     if (computedTotal <= 0) {
-      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId, req.user._id);
       return res.status(400).json({ success: false, message: 'Computed order total must be positive' });
+    }
+
+    let reservationLedger;
+    try {
+      reservationLedger = await stockService.reserveStock(verifiedItems);
+    } catch (e) {
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId, req.user._id);
+      return res.status(e.statusCode || 409).json({ success: false, message: e.message });
     }
 
     const receipt = `ORD_${Date.now().toString().slice(-10)}`;
@@ -151,33 +103,44 @@ exports.createRazorpayOrder = async (req, res) => {
     const razorpayResponse = await razorpayService.createOrder(computedTotal, 'INR', receipt);
     if (!razorpayResponse.success) {
       // Never leave a coupon use claimed against an order that was never created.
-      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId);
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId, req.user._id);
+      await stockService.restoreReservedStock(reservationLedger);
       return res.status(400).json({ success: false, message: razorpayResponse.message });
     }
 
     // Persist a PENDING order so we can link it on webhook/verify
-    const pendingOrder = await Order.create({
-      userId:        req.user._id,
-      orderItems:    verifiedItems,
-      shippingAddress,
-      paymentMode:   'Online',
-      paymentStatus: 'Pending',
-      orderStatus:   'Pending',
-      itemsPrice:    computedItemsPrice,
-      shippingPrice,
-      discountAmount,
-      onlineDiscount,
-      couponUsed,
-      totalAmount:   computedTotal,
-      paymentDetails: {
-        razorpayOrderId: razorpayResponse.data.id
-      },
-      statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Awaiting online payment' }]
-    });
+    let pendingOrder;
+    try {
+      pendingOrder = await Order.create({
+        userId:        req.user._id,
+        orderItems:    verifiedItems,
+        shippingAddress,
+        paymentMode:   'Online',
+        paymentStatus: 'Pending',
+        orderStatus:   'Pending',
+        itemsPrice:    computedItemsPrice,
+        shippingPrice,
+        discountAmount,
+        onlineDiscount,
+        couponUsed,
+        totalAmount:   computedTotal,
+        stockDecremented: true,
+        paymentDetails: {
+          razorpayOrderId: razorpayResponse.data.id
+        },
+        statusHistory: [{ status: 'Pending', changedAt: new Date(), note: 'Awaiting online payment' }]
+      });
+    } catch (createError) {
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId, req.user._id);
+      await stockService.restoreReservedStock(reservationLedger);
+      throw createError;
+    }
 
     // ── Save address to user profile only if explicitly requested ──────────
     if (req.body?.saveAddress === true) {
-      saveAddressToUser(req.user._id, shippingAddress).catch(() => {});
+      saveAddressToUser(req.user._id, shippingAddress).catch((error) => {
+        console.error('Unable to persist online checkout address:', error.message);
+      });
     }
 
     res.status(200).json({
@@ -277,10 +240,7 @@ exports.verifyPayment = async (req, res) => {
     // ── Confirmation to the customer + alert to the admin ────────────────────
     // Fire-and-forget: the payment is already captured, so a mail failure must
     // never turn a successful checkout into an error for the customer.
-    notify.sendOrderConfirmation(order, req.user).catch((e) =>
-      console.error('⚠️  Order confirmation email failed:', e.message));
-    notify.notifyAdminNewOrder(order, req.user).catch((e) =>
-      console.error('⚠️  Admin new-order alert failed:', e.message));
+    await notificationDelivery.deliver(order._id);
 
     res.status(200).json({
       success: true,
@@ -388,10 +348,7 @@ exports.razorpayWebhook = async (req, res) => {
           await order.save();
 
           const customer = await User.findById(order.userId).select('name email phone');
-          notify.sendOrderConfirmation(order, customer).catch((e) =>
-            console.error('⚠️  Order confirmation email failed (webhook):', e.message));
-          notify.notifyAdminNewOrder(order, customer).catch((e) =>
-            console.error('⚠️  Admin new-order alert failed (webhook):', e.message));
+          await notificationDelivery.deliver(order._id);
         } else {
           // Already Paid by verifyPayment — still 200 so Razorpay doesn't retry
           console.log(`ℹ️  Webhook: payment.captured — order already confirmed (rzpOrderId=${rzpOrderId})`);
@@ -410,11 +367,12 @@ exports.razorpayWebhook = async (req, res) => {
           order.paymentStatus = 'Failed';
           await order.save();
           console.log(`❌ Webhook: payment.failed — order ${order._id} marked failed`);
+          await stockService.restoreStockAfterCancel(order);
 
           // The coupon use was claimed when the Razorpay order was created.
           // The payment never landed, so hand it back to the customer.
           if (order.couponUsed?.couponId) {
-            await couponService.releaseCoupon(order.couponUsed.couponId);
+            await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id);
           }
         }
       }
@@ -442,7 +400,7 @@ exports.razorpayWebhook = async (req, res) => {
           await stockService.restoreStockAfterCancel(order).catch((err) =>
             console.error('⚠️  Stock restore error (webhook):', err.message));
           if (order.couponUsed?.couponId) {
-            await couponService.releaseCoupon(order.couponUsed.couponId);
+            await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id);
           }
 
           const customer = await User.findById(order.userId).select('name email phone');
@@ -496,11 +454,12 @@ exports.handlePaymentFailure = async (req, res) => {
       });
       await order.save();
       console.log(`❌ Payment dismissed/failed — order ${order._id} marked Failed`);
+      await stockService.restoreStockAfterCancel(order);
 
       // Hand the coupon use back — it was claimed when the Razorpay order was
       // created and this customer never actually paid.
       if (order.couponUsed?.couponId) {
-        await couponService.releaseCoupon(order.couponUsed.couponId);
+        await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id);
       }
     }
 
@@ -601,7 +560,7 @@ exports.refundPayment = async (req, res) => {
     statsCache.invalidate('products:');
     statsCache.invalidate('combos:');
     if (updatedOrder.couponUsed?.couponId) {
-      await couponService.releaseCoupon(updatedOrder.couponUsed.couponId).catch((err) =>
+      await couponService.releaseCoupon(updatedOrder.couponUsed.couponId, updatedOrder.userId, updatedOrder._id).catch((err) =>
         console.error('⚠️  Coupon release error (admin refund):', err.message)
       );
     }
@@ -624,4 +583,3 @@ exports.refundPayment = async (req, res) => {
     return serverError(res, error, 'paymentController.js → refundPayment');
   }
 };
-

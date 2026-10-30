@@ -213,6 +213,7 @@ exports.createReview = async (req, res) => {
     // ── Purchase & Delivery Verification ───────────────────────────────────────
     let orderQuery = {
       userId,
+      orderStatus: 'Delivered',
       'orderItems.product': productId
     };
 

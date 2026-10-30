@@ -192,7 +192,13 @@ const orderSchema = new mongoose.Schema({
     required:  Number,
     available: Number,
     at:        Date
-  }]
+  }],
+  notificationDelivery: {
+    customerStatus: { type: String, enum: ['Pending', 'Sending', 'Sent', 'Failed'], default: 'Pending' },
+    adminStatus: { type: String, enum: ['Pending', 'Sending', 'Sent', 'Failed'], default: 'Pending' },
+    lastAttemptAt: Date,
+    lastError: String
+  }
 }, {
   timestamps: true
 });

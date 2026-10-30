@@ -3,6 +3,26 @@
 
 const nodemailer = require('nodemailer');
 
+exports.sendStockAlertEmail = async (to, productName) => {
+  if (!to) return { success: false, message: 'Recipient email is required' };
+  try {
+    if (!process.env.BREVO_SMTP_USER || !process.env.BREVO_SMTP_PASS) {
+      console.log(`Stock alert for ${to}: "${productName}" is back in stock`);
+      return { success: true, message: 'Stock alert logged' };
+    }
+    await transporter.sendMail({
+      from: process.env.BREVO_FROM_EMAIL || 'noreply@freshveggies.com',
+      to,
+      subject: `${productName} is back in stock`,
+      html: `<p>Good news! <strong>${productName}</strong> is back in stock.</p>`
+    });
+    return { success: true, message: 'Stock alert sent' };
+  } catch (error) {
+    console.error('Error sending stock alert:', error.message);
+    return { success: false, message: 'Failed to send stock alert' };
+  }
+};
+
 // Create transporter for Brevo SMTP
 let transporter = nodemailer.createTransport({
   host: process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com',

@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 const Product = require('../models/product.model');
+const StockAlert = require('../models/stock-alert.model');
+const stockAlertService = require('../services/stock-alert.service');
 const cacheService = require('../utils/cache.util');
 const { serverError } = require('../utils/respond.util');
 
@@ -443,7 +445,24 @@ exports.notifyStock = async (req, res) => {
       if (match) variantName = match.quantity;
     }
 
-    console.log(`[FEAT-005 StockAlert] Registered alert for ${product.name} (${variantName}) -> ${email || phone}`);
+    const alert = await StockAlert.findOneAndUpdate(
+      {
+        productId: product._id,
+        packageId: packageId || null,
+        email: email ? String(email).trim().toLowerCase() : null,
+        phone: phone ? String(phone).replace(/\D/g, '').slice(-10) : null,
+        status: 'pending'
+      },
+      {
+        $setOnInsert: {
+          productId: product._id,
+          packageId: packageId || null,
+          email: email ? String(email).trim().toLowerCase() : null,
+          phone: phone ? String(phone).replace(/\D/g, '').slice(-10) : null
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     return res.status(200).json({
       success: true,
@@ -453,7 +472,7 @@ exports.notifyStock = async (req, res) => {
         productName: product.name,
         variant: variantName,
         recipient: email || phone,
-        registeredAt: new Date().toISOString()
+        registeredAt: alert.createdAt
       }
     });
   } catch (error) {
@@ -471,6 +490,8 @@ exports.createProduct = async (req, res) => {
       req.body.stock = req.body.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
     }
     const product = await Product.create(req.body);
+    if (product.stock > 0) stockAlertService.notifyProductBackInStock(product).catch((error) =>
+      console.error('Stock alert processing failed:', error.message));
 
     const auditService = require('../services/audit.service');
     auditService.logAction({
@@ -505,6 +526,7 @@ exports.updateProduct = async (req, res) => {
     if (req.body.packages && Array.isArray(req.body.packages) && req.body.packages.length > 0) {
       req.body.stock = req.body.packages.reduce((sum, p) => sum + (Number(p.stock) || 0), 0);
     }
+    const previousProduct = await Product.findOne({ _id: req.params.id, isDeleted: { $ne: true } }).select('stock packages');
     const product = await Product.findOneAndUpdate(
       { _id: req.params.id, isDeleted: { $ne: true } },
       req.body,
@@ -516,6 +538,11 @@ exports.updateProduct = async (req, res) => {
         success: false,
         message: 'Product not found'
       });
+    }
+    const wasOutOfStock = !previousProduct || Number(previousProduct.stock) <= 0;
+    if (wasOutOfStock && Number(product.stock) > 0) {
+      stockAlertService.notifyProductBackInStock(product).catch((error) =>
+        console.error('Stock alert processing failed:', error.message));
     }
 
     // FEAT-020: Flag dependent combos for review on product price change

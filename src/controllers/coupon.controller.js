@@ -1,8 +1,23 @@
 const Coupon = require('../models/coupon.model');
 const couponService = require('../services/coupon.service');
+const { buildVerifiedItems } = require('../services/pricing.service');
 const auditService = require('../services/audit.service');
 const cacheService = require('../utils/cache.util');
 const { serverError } = require('../utils/respond.util');
+
+const getVerifiedPreviewAmount = async (body = {}) => {
+  if (Array.isArray(body.orderItems) && body.orderItems.length > 0) {
+    const { computedItemsPrice } = await buildVerifiedItems(body.orderItems);
+    return computedItemsPrice;
+  }
+  const claimedAmount = Number(body.orderAmount ?? body.itemsPrice ?? body.orderTotal ?? body.subtotal);
+  if (!Number.isFinite(claimedAmount) || claimedAmount < 0) {
+    const error = new Error('A valid cart amount or order items are required');
+    error.isCouponError = true;
+    throw error;
+  }
+  return claimedAmount;
+};
 
 // @desc    Get all coupons
 // @route   GET /api/coupons
@@ -68,7 +83,7 @@ exports.getActiveCoupons = async (req, res) => {
 exports.validateCoupon = async (req, res) => {
   try {
     const { code } = req.body;
-    const orderAmount = req.body.orderAmount ?? req.body.itemsPrice ?? req.body.orderTotal ?? req.body.subtotal ?? 0;
+    const orderAmount = await getVerifiedPreviewAmount(req.body);
 
     // Delegates to couponService so this preview and the discount actually
     // applied at checkout can never disagree — they run the same code.
@@ -88,11 +103,12 @@ exports.validateCoupon = async (req, res) => {
         discountType:   result.coupon.discountType,
         discountValue:  result.coupon.discountValue,
         discountAmount: result.discountAmount,
-        finalAmount:    (Number(orderAmount) || 0) - result.discountAmount,
+        finalAmount:    orderAmount - result.discountAmount,
         savingsText:    `You saved ₹${result.discountAmount}!`
       }
     });
   } catch (error) {
+    if (error.isCouponError) return res.status(400).json({ success: false, message: error.message });
     return serverError(res, error, 'couponController.js → validateCoupon');
   }
 };
@@ -103,7 +119,7 @@ exports.validateCoupon = async (req, res) => {
 exports.applyCoupon = async (req, res) => {
   try {
     const { code } = req.body;
-    const orderAmount = req.body.orderAmount ?? req.body.itemsPrice ?? req.body.orderTotal ?? req.body.subtotal ?? 0;
+    const orderAmount = await getVerifiedPreviewAmount(req.body);
 
     const result = await couponService.validateCoupon(code, Number(orderAmount) || 0, req.user?._id || null);
 
@@ -126,6 +142,7 @@ exports.applyCoupon = async (req, res) => {
       }
     });
   } catch (error) {
+    if (error.isCouponError) return res.status(400).json({ success: false, message: error.message });
     return serverError(res, error, 'couponController.js → applyCoupon');
   }
 };

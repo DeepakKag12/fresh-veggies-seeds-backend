@@ -1,8 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert');
+
+process.env.NODE_ENV = 'test';
+process.env.CHAT_GUEST_SECRET = 'unit_test_chat_secret_key_1234567890';
+
 const {
   sanitizeText,
   validateCustomerContact,
+  issueGuestCapability,
+  verifyGuestCapability,
   canAccessConversation
 } = require('../../src/utils/chat-security.util');
 
@@ -56,15 +62,47 @@ test('Chat Security - validateCustomerContact', async (t) => {
   });
 });
 
+test('Chat Security - Guest Capability Cryptographic Issuance & Verification', async (t) => {
+  const validGuestId = 'guest_' + 'f'.repeat(32);
+
+  await t.test('issues valid capability format', () => {
+    const capability = issueGuestCapability(validGuestId);
+    assert.ok(capability.startsWith(validGuestId + '.'));
+    assert.strictEqual(verifyGuestCapability(validGuestId, capability), true);
+  });
+
+  await t.test('rejects tampered capability', () => {
+    const capability = issueGuestCapability(validGuestId);
+    const tampered = capability.slice(0, -2) + '00';
+    assert.strictEqual(verifyGuestCapability(validGuestId, tampered), false);
+  });
+
+  await t.test('rejects cross-guest capability reuse', () => {
+    const otherGuestId = 'guest_' + 'e'.repeat(32);
+    const capability = issueGuestCapability(validGuestId);
+    assert.strictEqual(verifyGuestCapability(otherGuestId, capability), false);
+  });
+
+  await t.test('rejects invalid types gracefully', () => {
+    assert.strictEqual(verifyGuestCapability(validGuestId, null), false);
+    assert.strictEqual(verifyGuestCapability(validGuestId, undefined), false);
+    assert.strictEqual(verifyGuestCapability(null, 'cap'), false);
+    assert.strictEqual(verifyGuestCapability(validGuestId, 12345), false);
+  });
+});
+
 test('Chat Security - canAccessConversation (IDOR / BOLA Guard)', async (t) => {
   const convUser = {
     _id: '507f1f77bcf86cd799439011',
     customerId: '507f1f77bcf86cd799439012'
   };
 
+  const validGuestId = 'guest_' + 'a'.repeat(32);
+  const validGuestCap = issueGuestCapability(validGuestId);
+
   const convGuest = {
     _id: '507f1f77bcf86cd799439013',
-    guestId: 'guest_verified_123'
+    guestId: validGuestId
   };
 
   await t.test('grants admin universal operational access', () => {
@@ -74,14 +112,20 @@ test('Chat Security - canAccessConversation (IDOR / BOLA Guard)', async (t) => {
 
   await t.test('grants access to conversation owner', () => {
     assert.strictEqual(canAccessConversation(convUser, { _id: '507f1f77bcf86cd799439012' }, null), true);
-    assert.strictEqual(canAccessConversation(convGuest, null, 'guest_verified_123'), true);
+    assert.strictEqual(canAccessConversation(convGuest, null, validGuestId, validGuestCap), true);
   });
 
   await t.test('blocks unauthorized users and attacker guests', () => {
     // Wrong user ID
     assert.strictEqual(canAccessConversation(convUser, { _id: '507f1f77bcf86cd799439999' }, null), false);
+    // Guest without capability
+    assert.strictEqual(canAccessConversation(convGuest, null, validGuestId, null), false);
+    // Guest with forged capability
+    assert.strictEqual(canAccessConversation(convGuest, null, validGuestId, validGuestId + '.invalid_signature'), false);
     // Wrong guest ID
-    assert.strictEqual(canAccessConversation(convGuest, null, 'guest_attacker_666'), false);
+    const attackerGuestId = 'guest_' + 'b'.repeat(32);
+    const attackerCap = issueGuestCapability(attackerGuestId);
+    assert.strictEqual(canAccessConversation(convGuest, null, attackerGuestId, attackerCap), false);
     // Unauthenticated requester
     assert.strictEqual(canAccessConversation(convUser, null, null), false);
     assert.strictEqual(canAccessConversation(null, { role: 'admin' }, null), false);

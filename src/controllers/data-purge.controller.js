@@ -107,9 +107,11 @@ exports.purgeData = async (req, res) => {
       removed[name] = (await model.deleteMany({})).deletedCount || 0;
     }
 
-    // Everyone except the operator. Their session stays valid, so they are not
-    // locked out of the store they just cleared.
+    // Everyone except the operator. The operator must re-authenticate after a
+    // destructive purge so a captured pre-purge token cannot continue to act.
     removed.users = (await User.deleteMany({ _id: { $ne: req.user._id } })).deletedCount || 0;
+    account.tokenVersion = (account.tokenVersion || 0) + 1;
+    await account.save({ validateBeforeSave: false });
 
     // Order numbers restart from 1 for the real store rather than continuing
     // from wherever the test data left off.

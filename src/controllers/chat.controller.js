@@ -6,8 +6,12 @@ const { getIO } = require('../socket');
 const {
   sanitizeText,
   validateCustomerContact,
+  issueGuestCapability,
+  verifyGuestCapability,
   canAccessConversation
 } = require('../utils/chat-security.util');
+
+const getGuestCapability = (req) => req.headers['x-guest-capability'] || req.body?.guestCapability || req.query?.guestCapability;
 
 /**
  * Customer: Get or initialize own active conversation
@@ -17,9 +21,13 @@ exports.getMyConversation = async (req, res) => {
   try {
     const userId = req.user?._id;
     const guestId = req.query.guestId;
+    const guestCapability = getGuestCapability(req);
 
     if (!userId && !guestId) {
       return res.status(400).json({ success: false, message: 'User ID or Guest ID required' });
+    }
+    if (!userId && !/^guest_[a-f0-9]{32}$/i.test(guestId)) {
+      return res.status(400).json({ success: false, message: 'Invalid guest chat identity' });
     }
 
     let conversation = null;
@@ -27,6 +35,15 @@ exports.getMyConversation = async (req, res) => {
       conversation = await Conversation.findOne({ customerId: userId, status: { $ne: 'archived' } });
     } else {
       conversation = await Conversation.findOne({ guestId, status: { $ne: 'archived' } });
+      if (conversation && !verifyGuestCapability(guestId, guestCapability)) {
+        const contactCheck = validateCustomerContact({
+          name: req.query.customerName,
+          phone: req.query.customerPhone
+        });
+        if (!contactCheck.valid || conversation.customerPhone !== contactCheck.cleanPhone) {
+          return res.status(403).json({ success: false, message: 'Guest chat capability required' });
+        }
+      }
     }
 
     if (!conversation) {
@@ -42,7 +59,11 @@ exports.getMyConversation = async (req, res) => {
       });
     }
 
-    res.status(200).json({ success: true, conversation });
+    res.status(200).json({
+      success: true,
+      conversation,
+      guestCapability: !userId ? issueGuestCapability(guestId) : undefined
+    });
   } catch (error) {
     console.error('Error in getMyConversation:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -56,9 +77,13 @@ exports.initConversation = async (req, res) => {
   try {
     const userId = req.user?._id;
     const { guestId, customerName, customerEmail, customerPhone, orderContext } = req.body;
+    const guestCapability = getGuestCapability(req);
 
     if (!userId && !guestId) {
       return res.status(400).json({ success: false, message: 'Identity required (user or guestId)' });
+    }
+    if (!userId && !/^guest_[a-f0-9]{32}$/i.test(guestId)) {
+      return res.status(400).json({ success: false, message: 'Invalid guest chat identity' });
     }
 
     let conversation = null;
@@ -66,6 +91,9 @@ exports.initConversation = async (req, res) => {
       conversation = await Conversation.findOne({ customerId: userId, status: { $ne: 'archived' } });
     } else {
       conversation = await Conversation.findOne({ guestId, status: { $ne: 'archived' } });
+      if (conversation && !verifyGuestCapability(guestId, guestCapability)) {
+        return res.status(403).json({ success: false, message: 'Guest chat capability required' });
+      }
     }
 
     // For guests, validate compulsory Name and 10-digit mobile number
@@ -110,7 +138,11 @@ exports.initConversation = async (req, res) => {
 
     await conversation.save();
 
-    res.status(200).json({ success: true, conversation });
+    res.status(200).json({
+      success: true,
+      conversation,
+      guestCapability: !userId ? issueGuestCapability(guestId) : undefined
+    });
   } catch (error) {
     console.error('Error in initConversation:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -202,6 +234,7 @@ exports.getConversationById = async (req, res) => {
   try {
     const { id } = req.params;
     const { guestId } = req.query;
+    const guestCapability = getGuestCapability(req);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, message: 'Invalid conversation ID' });
@@ -212,7 +245,7 @@ exports.getConversationById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
 
-    if (!canAccessConversation(conversation, req.user, guestId)) {
+    if (!canAccessConversation(conversation, req.user, guestId, guestCapability)) {
       return res.status(403).json({ success: false, message: 'Forbidden: Access denied to this conversation' });
     }
 
@@ -229,6 +262,7 @@ exports.getMessages = async (req, res) => {
   try {
     const { id } = req.params;
     const { limit = 100, before, guestId } = req.query;
+    const guestCapability = getGuestCapability(req);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, message: 'Invalid conversation ID' });
@@ -239,7 +273,7 @@ exports.getMessages = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
 
-    if (!canAccessConversation(conv, req.user, guestId)) {
+    if (!canAccessConversation(conv, req.user, guestId, guestCapability)) {
       return res.status(403).json({ success: false, message: 'Forbidden: Access denied to this conversation' });
     }
 
@@ -267,6 +301,7 @@ exports.sendMessage = async (req, res) => {
   try {
     const { id } = req.params;
     const { text = '', clientMsgId, orderContext, senderName, customerName, customerPhone, guestId, attachment } = req.body;
+    const guestCapability = getGuestCapability(req);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, message: 'Invalid conversation ID' });
@@ -282,7 +317,7 @@ exports.sendMessage = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
 
-    if (!canAccessConversation(conv, req.user, guestId)) {
+    if (!canAccessConversation(conv, req.user, guestId, guestCapability)) {
       return res.status(403).json({ success: false, message: 'Forbidden: Access denied to this conversation' });
     }
 
@@ -366,6 +401,7 @@ exports.markAsRead = async (req, res) => {
   try {
     const { id } = req.params;
     const guestId = req.body.guestId || req.query.guestId;
+    const guestCapability = getGuestCapability(req);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, message: 'Invalid conversation ID' });
@@ -376,7 +412,7 @@ exports.markAsRead = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
 
-    if (!canAccessConversation(conv, req.user, guestId)) {
+    if (!canAccessConversation(conv, req.user, guestId, guestCapability)) {
       return res.status(403).json({ success: false, message: 'Forbidden: Access denied to this conversation' });
     }
 
@@ -471,6 +507,7 @@ exports.deleteMessage = async (req, res) => {
   try {
     const { messageId } = req.params;
     const guestId = req.body.guestId || req.query.guestId;
+    const guestCapability = getGuestCapability(req);
 
     if (!mongoose.Types.ObjectId.isValid(messageId)) {
       return res.status(400).json({ success: false, message: 'Invalid message ID' });
@@ -489,7 +526,8 @@ exports.deleteMessage = async (req, res) => {
 
     const isAdmin = req.user?.role === 'admin';
     const isUserOwner = req.user?._id && String(msg.senderId) === String(req.user._id);
-    const isGuestOwner = !req.user && guestId && conv.guestId === guestId && msg.sender === 'customer';
+    const isGuestOwner = !req.user && guestId && conv.guestId === guestId &&
+      verifyGuestCapability(guestId, guestCapability) && msg.sender === 'customer';
 
     // Only admin or message owner can delete; customers cannot delete admin messages
     if (!isAdmin) {
@@ -566,6 +604,7 @@ exports.clearMessages = async (req, res) => {
   try {
     const { id } = req.params;
     const guestId = req.body.guestId || req.query.guestId;
+    const guestCapability = getGuestCapability(req);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ success: false, message: 'Invalid conversation ID' });
@@ -576,7 +615,7 @@ exports.clearMessages = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
 
-    if (!canAccessConversation(conv, req.user, guestId)) {
+    if (!canAccessConversation(conv, req.user, guestId, guestCapability)) {
       return res.status(403).json({ success: false, message: 'Forbidden: Access denied to this conversation' });
     }
 

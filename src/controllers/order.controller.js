@@ -25,68 +25,7 @@ const {
   canTransition,
 } = require('../config/order.config');
 const Settings = require('../models/settings.model');
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const saveAddressToUser = async (userId, shippingAddress) => {
-  try {
-    if (!userId || !shippingAddress || !shippingAddress.street) return;
-    const user = await User.findById(userId);
-    if (!user) return;
-
-    if (!user.addresses) user.addresses = [];
-
-    // Check if address already exists (same street and pincode)
-    const exists = user.addresses.some(
-      a => (a.street || '').trim().toLowerCase() === (shippingAddress.street || '').trim().toLowerCase() &&
-           (a.pincode || '').trim() === (shippingAddress.pincode || '').trim()
-    );
-
-    const isFirst = user.addresses.length === 0;
-
-    if (!exists) {
-      user.addresses.push({
-        name: shippingAddress.name || user.name,
-        phone: shippingAddress.phone || user.phone,
-        street: shippingAddress.street,
-        city: shippingAddress.city,
-        state: shippingAddress.state,
-        pincode: shippingAddress.pincode,
-        country: shippingAddress.country || 'India',
-        isDefault: isFirst,
-        createdAt: new Date()
-      });
-    }
-
-    // Update user.address to the latest shipping address if user.address is empty or this is first address
-    if (!user.address?.street || isFirst) {
-      user.address = {
-        street: shippingAddress.street,
-        city: shippingAddress.city,
-        state: shippingAddress.state,
-        pincode: shippingAddress.pincode,
-        country: shippingAddress.country || 'India'
-      };
-    }
-
-    // Update user name if currently default or placeholder
-    if (shippingAddress.name && (!user.name || /^customer(\s*\d+)?$/i.test(user.name.trim()))) {
-      user.name = shippingAddress.name.trim();
-    }
-
-    // Save optional email if not yet set on profile and not already registered to another user
-    if (shippingAddress.email && !user.email) {
-      const emailCandidate = shippingAddress.email.trim().toLowerCase();
-      const existingUserWithEmail = await User.findOne({ email: emailCandidate, _id: { $ne: user._id } });
-      if (!existingUserWithEmail) {
-        user.email = emailCandidate;
-      }
-    }
-
-    await user.save({ validateBeforeSave: false });
-  } catch (err) {
-    console.error('Error saving address to user profile:', err.message);
-  }
-};
+const { saveAddressToUser } = require('../services/address.service');
 
 // @desc    Create new COD order (server-side price validation)
 // @route   POST /api/orders
@@ -183,24 +122,25 @@ exports.createOrder = async (req, res) => {
 
     // COD maximum limit check
     if ((paymentMode === 'COD' || !paymentMode) && rules.codMaxOrder && computedTotal > rules.codMaxOrder) {
-      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId).catch(() => {});
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId, req.user._id).catch(() => {});
       return res.status(400).json({
         success: false,
         message: `Cash on Delivery is only available for orders up to ₹${rules.codMaxOrder}. Please use Online Payment.`
       });
     }
 
+    let reservationLedger;
     // ── Reserve stock atomically, before the order exists ─────────────────────
     // buildVerifiedItems only *checks* availability. Two customers racing for
     // the last unit both passed that check and both got an order. Claiming the
     // units here means the database picks exactly one winner and the other is
     // told it is sold out straight away, instead of finding out at confirmation.
     try {
-      await stockService.reserveStock(verifiedItems);
+      reservationLedger = await stockService.reserveStock(verifiedItems);
     } catch (e) {
       // Give back anything the coupon claim already took.
       if (couponUsed?.couponId) {
-        await couponService.releaseCoupon(couponUsed.couponId).catch(() => {});
+        await couponService.releaseCoupon(couponUsed.couponId, req.user._id).catch(() => {});
       }
       return res.status(e.statusCode || 409).json({ success: false, message: e.message });
     }
@@ -232,9 +172,9 @@ exports.createOrder = async (req, res) => {
     } catch (createErr) {
       // The coupon use was claimed before the order existed — hand it back so a
       // failed insert does not silently burn one of the customer's allowance.
-      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId).catch(() => {});
+      if (couponUsed?.couponId) await couponService.releaseCoupon(couponUsed.couponId, req.user._id).catch(() => {});
       // Return reserved stock so inventory does not leak on database insertion error.
-      await stockService.restoreReservedStock(verifiedItems).catch((e) =>
+      await stockService.restoreReservedStock(reservationLedger || verifiedItems).catch((e) =>
         console.error('⚠️  Failed to restore reserved stock on order create failure:', e.message)
       );
       throw createErr;
@@ -583,7 +523,7 @@ exports.updateOrderStatus = async (req, res) => {
         console.error('⚠️  Stock restore error:', err.message)
       );
       if (order.couponUsed?.couponId) {
-        couponService.releaseCoupon(order.couponUsed.couponId).catch((err) =>
+        couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id).catch((err) =>
           console.error('⚠️  Coupon release error:', err.message)
         );
       }
@@ -776,7 +716,7 @@ exports.approveCancellation = async (req, res) => {
       console.error('⚠️  Stock restore error:', err.message)
     );
     if (order.couponUsed?.couponId) {
-      await couponService.releaseCoupon(order.couponUsed.couponId);
+      await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id);
     }
 
     const finalOrder = await Order.findById(order._id);
@@ -1196,7 +1136,8 @@ exports.verifyCartIntegrity = async (req, res) => {
       const reportedPrice = Number(item.price) || 0;
 
       if (item.productType === 'Combo') {
-        const combo = await Combo.findById(item.product).populate('products.product', 'name price stock isActive');
+        const combo = await Combo.findById(item.product)
+          .populate('includedProducts.productId', 'name price stock isActive isDeleted');
         if (!combo || !combo.isActive) {
           changes.push({
             productId: item.product,
@@ -1210,11 +1151,11 @@ exports.verifyCartIntegrity = async (req, res) => {
 
         // Check combo stock and child products stock
         let availableStock = combo.stock !== undefined ? combo.stock : 999;
-        if (Array.isArray(combo.products)) {
-          for (const cp of combo.products) {
-            const childProd = cp.product;
+        if (Array.isArray(combo.includedProducts)) {
+          for (const cp of combo.includedProducts) {
+            const childProd = cp.productId;
             const requiredPerCombo = cp.quantity || 1;
-            if (!childProd || !childProd.isActive) {
+            if (!childProd || !childProd.isActive || childProd.isDeleted) {
               availableStock = 0;
               break;
             }
@@ -1231,11 +1172,11 @@ exports.verifyCartIntegrity = async (req, res) => {
           changes.push({
             productId: item.product,
             packageId: null,
-            name: combo.title || item.name,
+            name: combo.name || item.name,
             type: 'price_changed',
             oldPrice: reportedPrice,
             newPrice: currentPrice,
-            message: `Price for "${combo.title || item.name}" changed from ₹${reportedPrice} to ₹${currentPrice}.`
+            message: `Price for "${combo.name || item.name}" changed from ₹${reportedPrice} to ₹${currentPrice}.`
           });
         }
 
@@ -1243,13 +1184,13 @@ exports.verifyCartIntegrity = async (req, res) => {
           changes.push({
             productId: item.product,
             packageId: null,
-            name: combo.title || item.name,
+            name: combo.name || item.name,
             type: availableStock === 0 ? 'out_of_stock' : 'stock_reduced',
             requestedQuantity: quantity,
             availableStock,
             message: availableStock === 0
-              ? `"${combo.title || item.name}" is now out of stock.`
-              : `Only ${availableStock} units of "${combo.title || item.name}" left in stock (requested ${quantity}).`
+              ? `"${combo.name || item.name}" is now out of stock.`
+              : `Only ${availableStock} units of "${combo.name || item.name}" left in stock (requested ${quantity}).`
           });
         }
 
@@ -1261,13 +1202,13 @@ exports.verifyCartIntegrity = async (req, res) => {
             ...item,
             quantity: effectiveQty,
             price: effectivePrice,
-            name: combo.title || item.name,
+            name: combo.name || item.name,
             availableStock
           });
         }
       } else {
         // Standard Product
-        const product = await Product.findById(item.product);
+        const product = await Product.findOne({ _id: item.product, isDeleted: { $ne: true } });
         if (!product || !product.isActive) {
           changes.push({
             productId: item.product,
@@ -1559,7 +1500,3 @@ exports.issueOrderRefund = async (req, res) => {
     return serverError(res, error, 'orderController.js → issueOrderRefund');
   }
 };
-
-
-
-

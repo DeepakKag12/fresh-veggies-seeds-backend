@@ -4,6 +4,19 @@
  * compulsory contact checks for guest chat, and IDOR/BOLA authorization guards.
  */
 
+const crypto = require('crypto');
+
+function getGuestCapabilitySecret() {
+  const secret = process.env.CHAT_GUEST_SECRET || process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'test') {
+      return 'test_guest_secret_default_key_2026';
+    }
+    throw new Error('CHAT_GUEST_SECRET or JWT_SECRET must be configured for guest chat');
+  }
+  return secret;
+}
+
 /**
  * Strips HTML tags and controls max length to prevent XSS and payload bloat
  */
@@ -53,7 +66,7 @@ function validateCustomerContact({ name, phone }) {
  * Verifies if the requester (admin, authenticated customer, or guest)
  * is authorized to view, join, or send messages to the conversation.
  */
-function canAccessConversation(conversation, user, guestId) {
+function canAccessConversation(conversation, user, guestId, guestCapability) {
   if (!conversation) return false;
   
   // Admins have universal operational access
@@ -66,14 +79,40 @@ function canAccessConversation(conversation, user, guestId) {
 
   // Guest session matches conversation guestId
   if (guestId && conversation.guestId) {
-    return conversation.guestId === guestId;
+    return /^guest_[a-f0-9]{32}$/i.test(guestId) &&
+      conversation.guestId === guestId &&
+      verifyGuestCapability(guestId, guestCapability);
   }
 
   return false;
 }
 
+function issueGuestCapability(guestId) {
+  const secret = getGuestCapabilitySecret();
+  const signature = crypto
+    .createHmac('sha256', secret)
+    .update(guestId)
+    .digest('hex');
+  return `${guestId}.${signature}`;
+}
+
+function verifyGuestCapability(guestId, capability) {
+  if (typeof capability !== 'string' || typeof guestId !== 'string') return false;
+  try {
+    const expected = issueGuestCapability(guestId);
+    const actualBuffer = Buffer.from(capability);
+    const expectedBuffer = Buffer.from(expected);
+    return actualBuffer.length === expectedBuffer.length &&
+      crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   sanitizeText,
   validateCustomerContact,
+  issueGuestCapability,
+  verifyGuestCapability,
   canAccessConversation
 };

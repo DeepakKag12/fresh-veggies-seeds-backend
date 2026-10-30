@@ -4,11 +4,30 @@ const cloudinary = require('../config/cloudinary.config');
 const upload = require('../config/multer.config');
 const { protect, admin, optionalAuth } = require('../middleware/auth.middleware');
 const { serverError } = require('../utils/respond.util');
+const rateLimit = require('express-rate-limit');
+
+const chatUploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many chat image uploads. Please try again later.' }
+});
+
+const reviewUploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => (req.user?._id ? req.user._id.toString() : 'anonymous'),
+  validate: { keyGeneratorIpFallback: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many review image uploads. Please try again later.' }
+});
 
 // @desc    Upload in-app chat image attachment (Customer or Admin)
 // @route   POST /api/upload/chat-image
 // @access  Public / OptionalAuth (guest or user)
-router.post('/chat-image', optionalAuth, upload.single('image'), async (req, res) => {
+router.post('/chat-image', chatUploadLimiter, optionalAuth, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -133,7 +152,7 @@ router.post('/banner', protect, admin, upload.single('image'), async (req, res) 
 // @desc    Customer review photo upload
 // @route   POST /api/upload/review-image
 // @access  Private (any logged-in customer)
-router.post('/review-image', protect, upload.single('image'), async (req, res) => {
+router.post('/review-image', protect, reviewUploadLimiter, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'Please select an image to upload.' });

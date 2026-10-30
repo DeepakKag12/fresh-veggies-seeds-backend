@@ -7,6 +7,7 @@ const ChatMessage = require('./models/chat-message.model');
 const {
   sanitizeText,
   validateCustomerContact,
+  verifyGuestCapability,
   canAccessConversation
 } = require('./utils/chat-security.util');
 
@@ -38,12 +39,14 @@ const initSocket = (httpServer, corsOptions) => {
     try {
       const token = socket.handshake.auth?.token || socket.handshake.query?.token;
       const guestId = socket.handshake.auth?.guestId || socket.handshake.query?.guestId;
+      const guestCapability = socket.handshake.auth?.guestCapability || socket.handshake.query?.guestCapability;
       const customerName = socket.handshake.auth?.customerName || socket.handshake.query?.customerName;
       const customerPhone = socket.handshake.auth?.customerPhone || socket.handshake.query?.customerPhone;
 
       socket.data = {
         user: null,
         guestId: guestId || null,
+        guestCapability: guestCapability || null,
         customerName: customerName || 'Guest Shopper',
         customerPhone: customerPhone || ''
       };
@@ -71,7 +74,7 @@ const initSocket = (httpServer, corsOptions) => {
   });
 
   io.on('connection', async (socket) => {
-    const { user, guestId, customerName } = socket.data;
+    const { user, guestId, guestCapability, customerName } = socket.data;
     const isAdmin = user?.role === 'admin';
     const identityKey = getIdentityKey(user, guestId);
 
@@ -109,7 +112,7 @@ const initSocket = (httpServer, corsOptions) => {
         if (!conv) return;
 
         // Security check: Only allow admin OR verified owner of the conversation
-        if (!canAccessConversation(conv, user, guestId)) {
+        if (!canAccessConversation(conv, user, guestId, guestCapability)) {
           console.warn(`[Socket Security] Unauthorized join attempt to room ${conversationId} by identity ${identityKey}`);
           return;
         }
@@ -196,7 +199,7 @@ const initSocket = (httpServer, corsOptions) => {
         let conv = null;
         if (conversationId && mongoose.Types.ObjectId.isValid(conversationId)) {
           conv = await Conversation.findById(conversationId);
-          if (conv && !canAccessConversation(conv, user, guestId)) {
+          if (conv && !canAccessConversation(conv, user, guestId, guestCapability)) {
             if (typeof callback === 'function') callback({ error: 'Forbidden: Access denied to this conversation' });
             return;
           }

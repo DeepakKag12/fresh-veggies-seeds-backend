@@ -54,8 +54,9 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // Allow all Vercel deployments (*.vercel.app) for preview branches & production
-    if (/\.vercel\.app$/.test(cleanOrigin)) {
+    // Preview deployments are useful during development, but must not become
+    // trusted credentialed origins in production.
+    if (!isProduction && /\.vercel\.app$/.test(cleanOrigin)) {
       return callback(null, true);
     }
 
@@ -80,7 +81,11 @@ const corsOptions = {
     'If-None-Match',
     'If-Modified-Since',
     'X-Refresh-Token',
-    'x-no-compression'
+    'x-no-compression',
+    'X-Guest-Capability',
+    'x-guest-capability',
+    'X-Guest-Id',
+    'x-guest-id'
   ],
   exposedHeaders: [
     'ETag',
@@ -199,24 +204,45 @@ const connectDB = async () => {
   // ── Abandoned order cleanup (only schedule once per warm instance) ──────
   const Order = require('./models/order.model');
   const Settings = require('./models/settings.model');
+  const stockService = require('./services/stock.service');
+  const couponService = require('./services/coupon.service');
   const cleanupAbandonedOrders = async () => {
     try {
       const settings = await Settings.getSingleton().catch(() => null);
       if (settings && !settings.orders.autoCancelUnpaidOrders) return;
       const ttlMinutes = settings?.orders?.unpaidOrderTimeoutMinutes || 30;
       const cutoff = new Date(Date.now() - ttlMinutes * 60 * 1000);
-      const result = await Order.updateMany(
+      const abandonedOrders = await Order.find(
         { paymentMode: { $in: ['Online', 'UPI'] }, paymentStatus: 'Pending', createdAt: { $lt: cutoff } },
-        { $set: { paymentStatus: 'Failed' } }
+        { _id: 1, orderItems: 1, stockDecremented: 1, stockRestored: 1, couponUsed: 1, userId: 1 }
       );
-      if (result.modifiedCount > 0)
-        console.log(`🧹 Cleaned up ${result.modifiedCount} abandoned online order(s)`);
+      for (const order of abandonedOrders) {
+        const updated = await Order.updateOne(
+          { _id: order._id, paymentStatus: 'Pending' },
+          { $set: { paymentStatus: 'Failed' } }
+        );
+        if (updated.modifiedCount !== 1) continue;
+        await stockService.restoreStockAfterCancel(order);
+        if (order.couponUsed?.couponId) {
+          await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id);
+        }
+      }
+      if (abandonedOrders.length > 0)
+        console.log(`🧹 Cleaned up ${abandonedOrders.length} abandoned online order(s)`);
     } catch (err) {
       console.error('⚠️  Cleanup job error:', err.message);
     }
   };
   cleanupAbandonedOrders();
   setInterval(cleanupAbandonedOrders, 10 * 60 * 1000);
+
+  const notificationDelivery = require('./services/order-notification-delivery.service');
+  notificationDelivery.retryPending().catch((err) =>
+    console.error('⚠️  Pending order notification retry failed:', err.message)
+  );
+  setInterval(() => notificationDelivery.retryPending().catch((err) =>
+    console.error('⚠️  Pending order notification retry failed:', err.message)
+  ), 5 * 60 * 1000);
 
   // ── Sync stock for products sold by package variants ──────────────────────
   const Product = require('./models/product.model');
