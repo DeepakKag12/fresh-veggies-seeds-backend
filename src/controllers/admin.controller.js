@@ -37,6 +37,12 @@ exports.getDashboardStats = async (req, res) => {
     const realOrder = { $or: [{ paymentMode: 'COD' }, { paymentStatus: { $in: ['Paid', 'Refunded'] } }] };
 
     // ── Run all queries concurrently using consolidated aggregations ─────────
+    const safeCount = (model, filter) =>
+      model.countDocuments(filter).catch((err) => {
+        console.warn(`SafeCount fallback on ${model.modelName}:`, err.message);
+        return 0;
+      });
+
     const [
       totalOrders, totalUsers, totalProducts,
       statusAgg,
@@ -46,39 +52,46 @@ exports.getDashboardStats = async (req, res) => {
       urgentOrders,
       revAggList
     ] = await Promise.all([
-      Order.countDocuments(realOrder),
-      User.countDocuments({ role: 'customer' }),
-      Product.countDocuments({ isDeleted: { $ne: true } }),
+      safeCount(Order, realOrder),
+      safeCount(User, { role: 'customer' }),
+      safeCount(Product, { isDeleted: { $ne: true } }),
 
       // Single aggregation to get counts for all statuses in 1 query
       Order.aggregate([
         { $match: realOrder },
         { $group: { _id: '$orderStatus', count: { $sum: 1 } } }
-      ]),
+      ]).catch((err) => {
+        console.warn('Status aggregation fallback:', err.message);
+        return [];
+      }),
 
-      Order.countDocuments({ paymentStatus: 'Failed' }),
-      Product.countDocuments({ isDeleted: { $ne: true }, stock: { $gt: 0, $lte: lowStockCutoff } }),
-      Product.countDocuments({ isDeleted: { $ne: true }, stock: { $lte: 0 } }),
-      Review.countDocuments({ isApproved: false, status: { $ne: 'rejected' } }),
+      safeCount(Order, { paymentStatus: 'Failed' }),
+      safeCount(Product, { isDeleted: { $ne: true }, stock: { $gt: 0, $lte: lowStockCutoff } }),
+      safeCount(Product, { isDeleted: { $ne: true }, stock: { $lte: 0 } }),
+      safeCount(Review, { isApproved: false, status: { $ne: 'rejected' } }),
 
       // Real order counts over time
-      Order.countDocuments({ ...realOrder, createdAt: { $gte: today } }),
-      Order.countDocuments({ ...realOrder, createdAt: { $gte: yesterday, $lte: yesterdayEnd } }),
-      Order.countDocuments({ ...realOrder, createdAt: { $gte: monthStart } }),
-      Order.countDocuments({ ...realOrder, createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
+      safeCount(Order, { ...realOrder, createdAt: { $gte: today } }),
+      safeCount(Order, { ...realOrder, createdAt: { $gte: yesterday, $lte: yesterdayEnd } }),
+      safeCount(Order, { ...realOrder, createdAt: { $gte: monthStart } }),
+      safeCount(Order, { ...realOrder, createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
 
       // Real customer counts over time
-      User.countDocuments({ role: 'customer', createdAt: { $gte: today } }),
-      User.countDocuments({ role: 'customer', createdAt: { $gte: yesterday, $lte: yesterdayEnd } }),
-      User.countDocuments({ role: 'customer', createdAt: { $gte: monthStart } }),
-      User.countDocuments({ role: 'customer', createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
+      safeCount(User, { role: 'customer', createdAt: { $gte: today } }),
+      safeCount(User, { role: 'customer', createdAt: { $gte: yesterday, $lte: yesterdayEnd } }),
+      safeCount(User, { role: 'customer', createdAt: { $gte: monthStart } }),
+      safeCount(User, { role: 'customer', createdAt: { $gte: lastMonthStart, $lte: lastMonthEnd } }),
 
       // Urgent orders requiring immediate action
       Order.find({ ...realOrder, orderStatus: { $in: ['Pending', 'CancellationRequested'] } })
         .populate('userId', 'name email phone')
         .sort({ createdAt: -1 })
         .limit(10)
-        .lean(),
+        .lean()
+        .catch((err) => {
+          console.warn('Urgent orders query fallback:', err.message);
+          return [];
+        }),
 
       // Consolidated single aggregation for all real revenue figures
       Order.aggregate([
@@ -124,7 +137,10 @@ exports.getDashboardStats = async (req, res) => {
             },
           }
         }
-      ]),
+      ]).catch((err) => {
+        console.warn('Revenue aggregation fallback:', err.message);
+        return [];
+      }),
     ]);
 
     // Map status counts from single aggregation

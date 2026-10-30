@@ -184,32 +184,23 @@ app.use('/api/', noStore);
 // Vercel runs each request in a serverless function. We cache the connection
 // across warm invocations and await it in middleware so every handler is
 // guaranteed a live connection before it executes.
-let _dbConnected = false;
+let cachedPromise = null;
+let _routinesStarted = false;
 
-const connectDB = async () => {
-  if (_dbConnected || mongoose.connection.readyState >= 1) {
-    _dbConnected = true;
-    return;
-  }
+const startBackgroundRoutines = () => {
+  if (_routinesStarted || process.env.VERCEL) return;
+  _routinesStarted = true;
 
-  await mongoose.connect(process.env.MONGODB_URI, {
-    bufferCommands: false,          // fail fast instead of queuing forever
-    serverSelectionTimeoutMS: 10000,
-    socketTimeoutMS: 45000,
-  });
-
-  _dbConnected = true;
-  console.log('✅ MongoDB Connected Successfully');
-
-  // ── Abandoned order cleanup (only schedule once per warm instance) ──────
+  // ── Abandoned order cleanup (only scheduled on persistent servers) ───────
   const Order = require('./models/order.model');
   const Settings = require('./models/settings.model');
   const stockService = require('./services/stock.service');
   const couponService = require('./services/coupon.service');
+
   const cleanupAbandonedOrders = async () => {
     try {
       const settings = await Settings.getSingleton().catch(() => null);
-      if (settings && !settings.orders.autoCancelUnpaidOrders) return;
+      if (settings && !settings.orders?.autoCancelUnpaidOrders) return;
       const ttlMinutes = settings?.orders?.unpaidOrderTimeoutMinutes || 30;
       const cutoff = new Date(Date.now() - ttlMinutes * 60 * 1000);
       const abandonedOrders = await Order.find(
@@ -227,12 +218,14 @@ const connectDB = async () => {
           await couponService.releaseCoupon(order.couponUsed.couponId, order.userId, order._id);
         }
       }
-      if (abandonedOrders.length > 0)
+      if (abandonedOrders.length > 0) {
         console.log(`🧹 Cleaned up ${abandonedOrders.length} abandoned online order(s)`);
+      }
     } catch (err) {
       console.error('⚠️  Cleanup job error:', err.message);
     }
   };
+
   cleanupAbandonedOrders();
   setInterval(cleanupAbandonedOrders, 10 * 60 * 1000);
 
@@ -261,6 +254,30 @@ const connectDB = async () => {
     }
   };
   syncVariantStock();
+};
+
+const connectDB = async () => {
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
+  }
+
+  if (!cachedPromise) {
+    cachedPromise = mongoose.connect(process.env.MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+    }).then((m) => {
+      console.log('✅ MongoDB Connected Successfully');
+      startBackgroundRoutines();
+      return m;
+    }).catch((err) => {
+      cachedPromise = null;
+      throw err;
+    });
+  }
+
+  await cachedPromise;
+  return mongoose.connection;
 };
 
 // ─── Health check ─────────────────────────────────────────────────────────────
